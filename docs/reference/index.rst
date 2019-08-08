@@ -14,6 +14,7 @@ pynetdicom.
 
 .. toctree::
    :maxdepth: 2
+   :includehidden:
 
    acse
    ae
@@ -21,6 +22,7 @@ pynetdicom.
    dimse
    dsutils
    dul
+   events
    fsm
    presentation
    service_classes

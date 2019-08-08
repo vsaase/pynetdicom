@@ -13,6 +13,7 @@ import struct
 from threading import Thread
 import time
 
+from pynetdicom import evt
 from pynetdicom.fsm import StateMachine
 from pynetdicom.pdu import (
     A_ASSOCIATE_RQ, A_ASSOCIATE_AC, A_ASSOCIATE_RJ,
@@ -34,8 +35,6 @@ class DULServiceProvider(Thread):
     ----------
     artim_timer : timer.Timer
         The ARTIM timer
-    association : association.Association
-        The DUL's current Association
     socket : transport.AssociationSocket
         A wrapped socket.socket object used to communicate with the peer.
     to_provider_queue : queue.Queue
@@ -56,7 +55,7 @@ class DULServiceProvider(Thread):
             The DUL's parent Association instance.
         """
         # The association thread
-        self.assoc = assoc
+        self._assoc = assoc
         self.socket = None
 
         # Current primitive and PDU
@@ -91,6 +90,11 @@ class DULServiceProvider(Thread):
         self.daemon = False
         self._kill_thread = False
 
+    @property
+    def assoc(self):
+        """Return the Association we are providing DUL services for."""
+        return self._assoc
+
     def _check_incoming_primitive(self):
         """Check the incoming primitive."""
         try:
@@ -116,23 +120,25 @@ class DULServiceProvider(Thread):
             The PDU subclass corresponding to the PDU and the event string
             corresponding to receiving that PDU type.
         """
-        acse = self.assoc.acse
+        # Trigger before data is decoded in case of exception in decoding
+        bytestream = bytes(bytestream)
+        evt.trigger(self.assoc, evt.EVT_DATA_RECV, {'data' : bytestream})
+
         pdu_types = {
-            0x01 : (A_ASSOCIATE_RQ, 'Evt6', acse.debug_receive_associate_rq),
-            0x02 : (A_ASSOCIATE_AC, 'Evt3', acse.debug_receive_associate_ac),
-            0x03 : (A_ASSOCIATE_RJ, 'Evt4', acse.debug_receive_associate_rj),
-            0x04 : (P_DATA_TF, 'Evt10', acse.debug_receive_data_tf),
-            0x05 : (A_RELEASE_RQ, 'Evt12', acse.debug_receive_release_rq),
-            0x06 : (A_RELEASE_RP, 'Evt13', acse.debug_receive_release_rp),
-            0x07 : (A_ABORT_RQ, 'Evt16', acse.debug_receive_abort)
+            b'\x01' : (A_ASSOCIATE_RQ, 'Evt6'),
+            b'\x02' : (A_ASSOCIATE_AC, 'Evt3'),
+            b'\x03' : (A_ASSOCIATE_RJ, 'Evt4'),
+            b'\x04' : (P_DATA_TF, 'Evt10'),
+            b'\x05' : (A_RELEASE_RQ, 'Evt12'),
+            b'\x06' : (A_RELEASE_RP, 'Evt13'),
+            b'\x07' : (A_ABORT_RQ, 'Evt16')
         }
 
-        pdu, event, acse_callback = pdu_types[bytestream[0]]
+        pdu, event = pdu_types[bytestream[0:1]]
         pdu = pdu()
-        pdu.decode(bytes(bytestream))
+        pdu.decode(bytestream)
 
-        # ACSE callback
-        acse_callback(pdu)
+        evt.trigger(self.assoc, evt.EVT_PDU_RECV, {'pdu' : pdu})
 
         return pdu, event
 
@@ -146,22 +152,6 @@ class DULServiceProvider(Thread):
             True if the idle timer has expired, False otherwise.
         """
         return self._idle_timer.expired
-
-    def _is_artim_expired(self):
-        """Return if the state machine's ARTIM timer has expired.
-
-        If it has then 'Evt18' is added to the event queue.
-
-        Returns
-        -------
-        bool
-            True if the ARTIM timer has expired, False otherwise
-        """
-        if self.artim_timer.expired:
-            self.event_queue.put('Evt18')
-            return True
-
-        return False
 
     def _is_transport_event(self):
         """Check to see if the socket has incoming data
@@ -320,7 +310,7 @@ class DULServiceProvider(Thread):
             return
 
         try:
-            # Decode the PDU data, get corresponding FSM and callback events
+            # Decode the PDU data, get corresponding FSM event
             pdu, event = self._decode_pdu(bytestream)
             self.event_queue.put(event)
         except Exception as exc:
@@ -334,7 +324,8 @@ class DULServiceProvider(Thread):
         self.primitive = self.pdu.to_primitive()
 
     def receive_pdu(self, wait=False, timeout=None):
-        """
+        """Return an item from the queue if one is available.
+
         Get the next item to be processed out of the queue of items sent
         from the DUL service provider to the service user
 
@@ -356,14 +347,21 @@ class DULServiceProvider(Thread):
             If the queue is empty.
         """
         try:
-            # Remove and return an item from the queue
-            #   If block is True and timeout is None then block until an item
-            #       is available.
-            #   If timeout is a positive number, blocks timeout seconds and
-            #       raises queue.Empty if no item was available in that time.
-            #   If block is False, return an item if one is immediately
-            #       available, otherwise raise queue.Empty
+            # If block is True and timeout is None then block until an item
+            #   is available.
+            # If timeout is a positive number, blocks timeout seconds and
+            #   raises queue.Empty if no item was available in that time.
+            # If block is False, return an item if one is immediately
+            #   available, otherwise raise queue.Empty
             queue_item = self.to_user_queue.get(block=wait, timeout=timeout)
+
+            # Event handler - ACSE received primitive from DUL service
+            acse_primitives = (A_ASSOCIATE, A_RELEASE, A_ABORT, A_P_ABORT)
+            if isinstance(queue_item, acse_primitives):
+                evt.trigger(
+                    self.assoc, evt.EVT_ACSE_RECV, {'primitive' : queue_item}
+                )
+
             return queue_item
         except queue.Empty:
             return None
@@ -388,21 +386,36 @@ class DULServiceProvider(Thread):
             if self._kill_thread:
                 break
 
+            # Check the ARTIM timer first so its event is placed on the queue
+            #   ahead of any other events this loop
+            if self.artim_timer.expired:
+                self.event_queue.put('Evt18')
+
             # Check the connection for incoming data
             try:
+                # We can either encode and send a primitive **OR**
+                #   receive and decode a PDU per loop of the reactor
                 if self._check_incoming_primitive():
                     pass
                 elif self._is_transport_event():
                     self._idle_timer.restart()
-
-                if self._is_artim_expired():
-                    self._kill_thread = True
-
             except Exception as exc:
-                LOGGER.error("Exception in DUL.run()")
+                LOGGER.error("Exception in DUL.run(), aborting association")
                 LOGGER.exception(exc)
+                # Bypass the state machine and send an A-ABORT
+                #   we do it this way because an exception here will mess up
+                #   the state machine and we can't guarantee it'll get sent
+                #   otherwise
+                abort_pdu = A_ABORT_RQ()
+                abort_pdu.source = 0x02
+                abort_pdu.reason_diagnostic = 0x00
+                self.socket.send(abort_pdu.encode())
+                self.assoc.is_aborted = True
+                self.assoc.is_established = False
+                # Hard shutdown of the Association and DUL reactors
+                self.assoc._kill = True
                 self._kill_thread = True
-                raise
+                return
 
             # Check the event queue to see if there is anything to do
             try:
@@ -425,6 +438,13 @@ class DULServiceProvider(Thread):
             A service primitive, one of A_ASSOCIATE, A_RELEASE, A_ABORT,
             A_P_ABORT or P_DATA.
         """
+        # Event handler - ACSE sent primitive to the DUL service
+        acse_primitives = (A_ASSOCIATE, A_RELEASE, A_ABORT, A_P_ABORT)
+        if isinstance(primitive, acse_primitives):
+            evt.trigger(
+                self.assoc, evt.EVT_ACSE_SENT, {'primitive' : primitive}
+            )
+
         self.to_provider_queue.put(primitive)
 
     def stop_dul(self):

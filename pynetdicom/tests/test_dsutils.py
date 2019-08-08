@@ -62,6 +62,16 @@ class TestEncode(object):
         ds_enc = encode(ds, False, False)
         assert ds_enc is None
 
+    def test_encode_none(self):
+        """Test encoding None."""
+        out = encode(None, True, True)
+        assert out is None
+
+    def test_encode_empty(self):
+        """Test encoding an empty dataset."""
+        out = encode(Dataset(), True, True)
+        assert out == b''
+
 
 class TestDecode(object):
     """Test dsutils.decode(bytes, is_implicit_vr, is_little_endian)."""
@@ -129,6 +139,6 @@ class TestElementEncode(object):
 class TestDecodeFailure(object):
     """Tests that ensure dataset decoding fails as expected"""
     def test_failure(self):
-        bytestream = BytesIO(b'\x08\x00\x01\x00\x04\x00\x00\x00\x00\x08\x00\x49')
-        with pytest.raises(NotImplementedError):
-            print(decode(bytestream, False, True))
+        def dummy(): pass
+        with pytest.raises(AttributeError):
+            print(decode(dummy, False, True))

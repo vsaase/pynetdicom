@@ -30,9 +30,6 @@ of **AE** [1]_:
 * Valid characters belong to the DICOM `Default Character Repertoire <http://dicom.nema.org/medical/dicom/current/output/chtml/part05/chapter_E.html>`_
   [2]_, which is the basic G0 Set of the ISO646:1990 [5]_ (ASCII) standard
   excluding backslash ('\\ ' ``0x5c``) and all control characters [3]_.
-
-There's also an extra restriction on Application Entity AE titles:
-
 * An AE title made entirely of spaces is not allowed [4]_
 
 AE titles in *pynetdicom* are checked for validity (using
@@ -50,6 +47,10 @@ b'MY_AE_TITLE     '
 >>> len(ae.ae_title)
 16
 
+When creating SCPs its also possible to give each SCP its own AE title by
+specifying the ``ae_title`` keyword argument in
+:py:meth:`AE.start_server() <pynetdicom.ae.ApplicationEntity.start_server>`.
+
 .. _ae_create_scu:
 
 Creating an SCU
@@ -59,7 +60,7 @@ Adding requested Presentation Contexts
 ......................................
 
 If you intend to use your AE as a *Service Class User* then you need to
-specify the :ref:`Presentation Contexts <concepts_presentation_contexts>`
+specify the :ref:`Presentation Contexts <user_presentation>`
 that will be *requested* during
 Association negotiation. This can be done in two ways:
 
@@ -87,8 +88,9 @@ Adding presentation contexts all at once:
 >>> ae.requested_contexts = StoragePresentationContexts
 
 Here ``StoragePresentationContexts`` is a prebuilt list of presentation
-contexts containing (almost) all the Storage Service Class' supported SOP
-Classes, and there's a similar list for
+contexts containing (almost) all the Storage Service Class'
+`supported SOP Classes <http://dicom.nema.org/medical/dicom/current/output/chtml/part04/sect_B.5.html>`_,
+and there's a similar list for
 all the supported service classes. Alternatively you can build your own list
 of presentation contexts, either through creating new
 :py:class:`PresentationContext <pynetdicom.presentation.PresentationContext>`
@@ -113,7 +115,7 @@ Combining the all-at-once and one-by-one approaches:
 >>> ae.requested_contexts = StoragePresentationContexts
 >>> ae.add_requested_context(VerificationSOPClass)
 
-As the association requestor you're limited to a total of 128 requested
+As the association *Requestor* you're limited to a total of 128 requested
 presentation contexts, so attempting to add more than 128 contexts will raise
 a ``ValueError`` exception.
 
@@ -193,7 +195,7 @@ All the above examples set the requested presentation contexts on the
 Application Entity level, i.e. the same contexts will be used for all
 association requests. To set the requested presentation contexts on a
 per-association basis (i.e. each association request can have different
-requested contexts) you can use the ``context`` parameter when calling
+requested contexts) you can use the ``context`` keyword argument when calling
 :py:meth:`AE.associate() <pynetdicom.ae.ApplicationEntity.associate>` (see
 the :ref:`Association <association>` page for more information).
 
@@ -203,7 +205,7 @@ In general it shouldn't be necessary to specify the port when acting as an SCU.
 By default *pynetdicom* will use the first available port to communicate with a
 peer AE. To specify the port number you can use the ``bind_address`` keyword
 parameter when requesting an association, which takes a 2-tuple of
-(host, port):
+(str *host*, int *port*):
 
 >>> from pynetdicom import AE
 >>> ae = AE()
@@ -224,7 +226,7 @@ Adding supported Presentation Contexts
 ......................................
 
 If you intend to use your AE as a *Service Class Provider* then you need to
-specify the :ref:`Presentation Contexts <concepts_presentation_contexts>`
+specify the :ref:`Presentation Contexts <user_presentation>`
 that will be *supported* during
 Association negotiation. This can be done in two ways:
 
@@ -253,8 +255,9 @@ Adding presentation contexts all at once:
 >>> ae.supported_contexts = StoragePresentationContexts
 
 Here ``StoragePresentationContexts`` is a prebuilt list of presentation
-contexts containing (almost) all the Storage Service Class' supported SOP
-Classes, and there's a similar list for
+contexts containing (almost) all the Storage Service Class'
+`supported SOP Classes <http://dicom.nema.org/medical/dicom/current/output/chtml/part04/sect_B.5.html>`_,
+and there's a similar list for
 all the supported service classes. Alternatively you can build your own list
 of presentation contexts, either through creating new
 :py:class:`PresentationContext <pynetdicom.presentation.PresentationContext>`
@@ -279,7 +282,7 @@ Combining the all-at-once and one-by-one approaches:
 >>> ae.supported_contexts = StoragePresentationContexts
 >>> ae.add_supported_context(VerificationSOPClass)
 
-As the association acceptor you're not limited in the number of presentation
+As the association *Acceptor* you're not limited in the number of presentation
 contexts that you can support.
 
 When you add presentation contexts as shown above, the following transfer
@@ -332,7 +335,7 @@ Transfer Syntax(es):
     =Explicit VR Little Endian
     =Explicit VR Big Endian
 
-For the association acceptor its not possible to have multiple supported
+For the association *Acceptor* its not possible to have multiple supported
 presentation contexts for the same abstract syntax, instead any additional
 transfer syntaxes will be combined with the pre-existing context:
 
@@ -351,15 +354,25 @@ Transfer Syntax(es):
     =Explicit VR Little Endian
 
 
+All the above examples set the supported presentation contexts on the
+Application Entity level, i.e. the same contexts will be used for all
+SCPs. To set the supported presentation contexts on a
+per-SCP basis (i.e. each SCP can have different
+supported contexts) you can use the ``context`` keyword argument when calling
+:py:meth:`AE.start_server() <pynetdicom.ae.ApplicationEntity.start_server>` (see
+the :ref:`Association <association>` page for more information).
+
+
 Handling SCP/SCU Role Selection Negotiation
 ...........................................
 
-Depending on the requirements of the service class, an association requestor
-may include SCP/SCU Role Selection Negotiation items
-in the association request and it's up to the association acceptor to decide
-whether or not to accept the proposed roles. This can be done through the
-``scu_role`` and ``scp_role`` parameters, which control whether or not the
-association acceptor will accept or reject the proposal:
+Depending on the requirements of the service class, an association *Requestor*
+may include
+`SCP/SCU Role Selection Negotiation <http://dicom.nema.org/medical/dicom/current/output/chtml/part07/sect_D.3.3.4.html>`_
+items in the association request and it's up to the association *Acceptor*
+to decide whether or not to accept the proposed roles. This can be done
+through the ``scu_role`` and ``scp_role`` parameters, which control whether
+or not the association *Acceptor* will accept or reject the proposal:
 
 >>> from pynetdicom import AE
 >>> from pynetdicom.sop_class import CTImageStorage
@@ -369,28 +382,31 @@ association acceptor will accept or reject the proposal:
 If either ``scu_role`` or ``scp_role`` is None (the default) then no response
 to the role selection will be sent and the default roles assumed. If you wish
 to accept a proposed role then set the corresponding parameter to ``True``. In
-the above example if the requestor proposes the SCP role then the acceptor will
-accept it while rejecting the proposed SCU role (and therefore the acceptor
-will be SCU and requestor SCP).
+the above example if the *Requestor* proposes the SCP role then the *Acceptor*
+will accept it while rejecting the proposed SCU role (and therefore the
+*Acceptor* will be SCU and *Requestor* SCP).
 
 To reiterate, if you wish to respond to the proposed role selection then
 **both** ``scu_role`` and ``scp_role`` must be set, and the value you set
 indicates whether or not to accept or reject the proposal.
 
-There are four possible outcomes for the role selection negotiation, depending
+There are :ref:`four possible outcomes <role_selection_negotiation>`
+for the role selection negotiation, depending
 on what was proposed and what was accepted:
 
 * The proposed roles aren't acceptable and the context is rejected
-* The acceptor acts as the SCP and the requestor the SCU (default)
-* The acceptor acts as the SCU and the requestor the SCP
-* Both acceptor and requestor act as SCU and SCP
+* The *Acceptor* acts as the SCP and the *Requestor* the SCU (default)
+* The *Acceptor* acts as the SCU and the *Requestor* the SCP
+* Both *Acceptor* and *Requestor* act as SCU and SCP
 
 Handling User Identity Negotiation
 ..................................
 
-An association requestor may include a User Identity Negotiation item in the
-association request with the aim of providing the acceptor a method of
-verifying its identity. Possible forms of identity confirmation methods are:
+An association *Requestor* may include a
+`User Identity Negotiation <http://dicom.nema.org/medical/dicom/current/output/chtml/part07/sect_D.3.3.7.html>`_
+item in the association request with the aim of providing the *Acceptor* a
+method of verifying its identity. Possible forms of identity confirmation
+methods are:
 
 * Username
 * Username and password (sent in the clear)
@@ -402,63 +418,35 @@ By default all association requests that include user identity negotiation
 are accepted (provided there's no other reason to reject) and
 no user identity negotiation response is sent even if one is requested.
 
-To handle the user identity negotiation yourself you should implement the
-:py:meth:`AE.on_user_identity <pynetdicom.ae.ApplicationEntity.on_user_identity>`
-callback.
+To handle a user identity negotiation yourself you
+should implement and bind a :ref:`handler <user_events>` to the
+``evt.EVT_USER_ID`` event. Check the
+`documentation <../reference/generated/pynetdicom._handlers.doc_handle_userid.html>`_
+to see the requirements for implementations of the ``evt.EVT_USER_ID`` handler.
 
 .. code-block:: python
 
-    from pynetdicom import AE
+    from pynetdicom import AE, evt
     from pynetdicom.sop_class import VerificationSOPClass
 
-    def on_user_identity(identity_type, primary_field, secondary_field, info):
-        """Handle user identity negotiation requests.
-
-        Parameters
-        ----------
-        identity_type : int
-            * 1 - Username as a UTF-8 string
-            * 2 - Username as a UTF-8 string and passcode
-            * 3 - Kerberos Service ticket
-            * 4 - SAML Assertion
-            * 5 - JSON Web Token
-        primary_field : bytes
-            The value of the request's *Primary Field* parameter.
-        secondary_field : bytes or None
-            If the `identity_type` is 2 then the passcode, otherwise None.
-        info : dict
-            A dict containing information about the association requestor.
-
-        Returns
-        -------
-        is_verified : bool
-            Return True if the user identity has been confirmed and you wish
-            to proceed with association establishment, False otherwise.
-        response : bytes or None
-            If a positive response is requested and the identity is verified
-            then this will be the value of the response's *Server Response*
-            parameter. If ``user_id_type`` is:
-
-            * 1 or 2, then return None
-            * 3 then return the Kerberos Server ticket as bytes
-            * 4 then return the SAML response as bytes
-            * 5 then return the JSON web token as bytes
-        """
+    def handle_user_id(event):
+        """Handle evt.EVT_USER_ID."""
         # Identity verification code is outside the scope of pynetdicom
         is_verified, response = some_user_function()
 
         return is_verified, response
 
+    handlers = [(evt.EVT_USER_ID, handle_user_id)]
+
     ae = AE()
     ae.add_supported_context(VerificationSOPClass)
-    ae.on_user_identity = on_user_identity
-    ae.start_server(('', 11112))
+    ae.start_server(('', 11112), evt_handlers=handlers)
 
 
 Specifying the bind address
 ...........................
 The bind address for the server socket is specified by the ``address``
-parameter to ``start_server()`` as (host, port).
+parameter to ``start_server()`` as (str *host*, int *port*).
 
 >>> from pynetdicom import AE
 >>> ae = AE()

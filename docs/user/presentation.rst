@@ -6,21 +6,30 @@ Presentation Contexts
 Introduction
 ............
 
-Presentation Contexts are used in DICOM to fully define the content and the
+`Presentation Contexts <http://dicom.nema.org/medical/dicom/current/output/chtml/part08/chapter_7.html#sect_7.1.1.13>`_
+are used in DICOM to fully define the content and the
 encoding of a piece of data (typically a DICOM dataset). They consist of three
-main parts; a Context ID, an Abstract Syntax and one or more Transfer Syntaxes.
+main parts; a *Context ID*, an *Abstract Syntax* and one or more
+*Transfer Syntaxes*.
 
-* The Context ID is an odd-integer between 1 and 255 (inclusive) and identifies
-  the context. With *pynetdicom* this is not something you typically have to
-  worry about.
-* The Abstract Syntax defines what the data represents, usually identified by
-  a DICOM SOP Class UID such as '1.2.840.10008.1.1' (Verification SOP Class)
-  or '1.2.840.10008.5.1.4.1.1' (CT Image Storage). Private abstract syntaxes
-  are also allowed.
-* The Transfer Syntax defines how the data is encoded, usually identified by
-  a DICOM transfer syntax UID such as '1.2.840.10008.1.2' (Implicit VR Little
-  Endian) or '1.2.840.10008.1.2.4.50' (JPEG Baseline). Private transfer
-  syntaxes are also allowed.
+* The `Context ID <http://dicom.nema.org/medical/dicom/current/output/chtml/part08/sect_9.3.2.2.html>`_
+  is an odd-integer between 1 and 255 (inclusive) and
+  identifies the context. With *pynetdicom* this is not something you typically
+  have to worry about.
+* The `Abstract Syntax <http://dicom.nema.org/medical/dicom/current/output/chtml/part08/chapter_B.html>`_
+  defines what the data represents, usually identified by
+  a DICOM SOP Class UID (however private abstract syntaxes are also allowed)
+  such as:
+
+  - ``1.2.840.10008.1.1`` - *Verification SOP Class*
+  - ``1.2.840.10008.5.1.4.1.1`` - *CT Image Storage*
+* The `Transfer Syntax <http://dicom.nema.org/medical/dicom/current/output/chtml/part05/chapter_10.html>`_
+  defines how the data is encoded, usually identified by
+  a DICOM transfer syntax UID (however private transfer syntaxes are also
+  allowed) such as:
+
+  - ``1.2.840.10008.1.2`` - *Implicit VR Little Endian*
+  - ``1.2.840.10008.1.2.4.50`` - *JPEG Baseline*
 
 
 Representation in pynetdicom
@@ -42,7 +51,7 @@ Transfer Syntax(es):
     =Implicit VR Little Endian
     =JPEG Baseline (Process 1)
 
-However its more convenient to use the
+However its easier to use the
 :py:meth:`build_context <pynetdicom.presentation.build_context>`
 convenience function which returns a ``PresentationContext`` instance:
 
@@ -115,22 +124,23 @@ In *pynetdicom* this is accomplished through one of the following methods:
     assoc = ae.associate('127.0.0.1', 11112, contexts=requested)
 
 
-The abstract syntaxes you propose should match the (0008,0016) *SOP Class UID*
-of the SOP classes related to the service you wish to use. For example, if
+The abstract syntaxes you propose should match the SOP Class or Meta SOP Class
+that corresponds to the service you wish to use. For example, if
 you're intending to use the storage service then you'd propose one or more
 abstract syntaxes from the `corresponding SOP Class UIDs
 <http://dicom.nema.org/medical/dicom/current/output/chtml/part04/sect_B.5.html>`_.
 
 The transfer syntaxes you propose for each abstract syntax should match the
 transfer syntax of the data you wish to send. For example, if you have
-a CT Image Storage dataset with a (0002,0010) *Transfer Syntax UID* value of
-'1.2.840.10008.1.2.4.50' (JPEG Baseline) then you won't be able to send it
+a *CT Image Storage* dataset with a (0002,0010) *Transfer Syntax UID* value of
+1.2.840.10008.1.2.4.50 (*JPEG Baseline*) then you won't be able to send it
 unless you propose (and get accepted) a presentation context with a matching
 transfer syntax.
 
 .. note::
    Uncompressed transfer syntaxes are the exception to this rule as
-   *pydicom* is able to freely convert between these.
+   *pydicom* is able to freely convert between these (provided the endianness
+   remains the same).
 
 If you have data encoded in a variety of transfer syntaxes then you can propose
 multiple presentation contexts with the same abstract syntax but different
@@ -152,10 +162,10 @@ Abstract Syntax: CT Image Storage
 Transfer Syntax(es):
     =JPEG Baseline (Process 1)
 
-Provided both get accepted then its becomes possible to transfer CT Image
-datasets encoded in both JPEG Baseline and Implicit VR Little Endian.
+Provided both contexts get accepted then its becomes possible to transfer CT
+Image datasets encoded in *JPEG Baseline* and/or *Implicit VR Little Endian*.
 Alternatively it may be necessary to decompress datasets prior to sending (as
-Implicit VR Little Endian should always be acceptable).
+*Implicit VR Little Endian* should always be accepted).
 
 
 Presentation Contexts and the Association Acceptor
@@ -224,7 +234,7 @@ syntaxes:
 
   * JPEG Baseline
 
-If the *Requestor* proposes the following presentation contexts:
+And a *Requestor* that proposes the following presentation contexts:
 
 * Context 1: Verification SOP Class
 
@@ -246,15 +256,15 @@ If the *Requestor* proposes the following presentation contexts:
   * Implicit VR Little Endian
   * Explicit VR Little Endian
 
-Then the outcome of the association negotiation will be:
+Then the outcome of the presentation context negotiation will be:
 
-* Context 1: Accepted (with the *Acceptor* choosing one of Implicit or
-  Explicit VR Little Endian to use as the transfer syntax)
-* Context 3: Accepted with Implicit VR Little Endian transfer syntax
+* Context 1: Accepted (with the *Acceptor* choosing either *Implicit* or
+  *Explicit VR Little Endian* to use as the transfer syntax)
+* Context 3: Accepted with *Implicit VR Little Endian* transfer syntax
 * Context 5: Rejected (transfer syntax not supported) because the *Acceptor*
   and *Requestor* have no matching transfer syntax for the context.
 * Context 7: Rejected (abstract syntax not supported) because the *Acceptor*
-  doesn't support the CR Image Storage abstract syntax.
+  doesn't support the *CR Image Storage* abstract syntax.
 
 Contexts 1 and 3 have been accepted and can be used for sending data while
 5 and 7 have been rejected and are not available.
@@ -285,7 +295,7 @@ While the *Acceptor* supports:
         =Implicit VR Little Endian
         =Explicit VR Big Endian
 
-Then the accepted transfer syntax will be Explicit VR Little Endian.
+Then the accepted transfer syntax will be *Explicit VR Little Endian*.
 
 
 SCP/SCU Role Selection
@@ -294,28 +304,37 @@ SCP/SCU Role Selection
 The final wrinkle in presentation context negotiation is `SCP/SCU Role
 Selection <http://dicom.nema.org/medical/dicom/current/output/chtml/part07/sect_D.3.3.4.html>`_,
 which allows an association *Requestor* to propose its role (SCU, SCP, or
-SCU and SCP) for each proposed abstract syntax. Role selection is used for services such as the Query/Retrieve Service's C-GET
-requests, where the association *Acceptor* sends data back to the *Requestor*.
+SCU and SCP) for each proposed abstract syntax. Role selection is used for
+services such as the Query/Retrieve Service's C-GET requests, where the
+association *Acceptor* sends data back to the *Requestor*.
 
 To propose SCP/SCU Role Selection as a *Requestor* you should include
 :py:class:`SCP_SCU_RoleSelectionNegotiation <pynetdicom.pdu_primitives.SCP_SCU_RoleSelectionNegotiation>`
-items in the extended negotiation:
+items in the extended negotiation, either by creating them from scratch or
+using the :py:meth:`build_role() <pynetdicom.presentation.build_role>`
+convenience function:
 
   ::
 
-    from pynetdicom import AE
+    from pynetdicom import AE, build_role
     from pynetdicom.pdu_primitives import SCP_SCU_RoleSelectionNegotiation
-    from pynetdicom.sop_class import CTImageStorage
+    from pynetdicom.sop_class import CTImageStorage, MRImageStorage
 
     ae = AE()
     ae.add_requested_context(CTImageStorage)
+    ae.add_requested_context(MRImageStorage)
 
-    item = SCP_SCU_RoleSelectionNegotiation()
-    item.sop_class_uid = CTImageStorage
-    item.scu_role = True
-    item.scp_role = True
+    role_a = SCP_SCU_RoleSelectionNegotiation()
+    role_a.sop_class_uid = CTImageStorage
+    role_a.scu_role = True
+    role_a.scp_role = True
 
-    assoc = ae.associate('127.0.0.1', 11112, ext_neg=[item])
+    role_b = build_role(MRImageStorage, scp_role=True)
+
+    assoc = ae.associate('127.0.0.1', 11112, ext_neg=[role_a, role_b])
+
+When acting as the *Requestor* you can set **either or both** of ``scu_role`` and
+``scp_role``, with the non-specified role assumed to be ``False``.
 
 To support SCP/SCU Role Selection as an *Acceptor* you can use the ``scu_role``
 and ``scp_role`` arguments in ``AE.add_supported_context``:
@@ -330,9 +349,12 @@ and ``scp_role`` arguments in ``AE.add_supported_context``:
     ae.add_supported_context(CTImageStorage, scu_role=True, scp_role=False)
     ae.start_server(('', 11112))
 
-Both ``scu_role`` and ``scp_role`` must be specified. A value of True indicates
-that the *Acceptor* will accept the proposed role. *pynetdicom* uses the
-following table to decide the outcome of role selection negotiation:
+When acting as the *Acceptor* **both** ``scu_role`` and ``scp_role`` must be
+specified. A value of ``True`` indicates that the *Acceptor* will accept the
+proposed role. *pynetdicom* uses the following table to decide the outcome
+of role selection negotiation:
+
+.. _role_selection_negotiation:
 
 +---------------------+---------------------+----------------------+----------+
 | Requestor           | Acceptor            | Outcome              | Notes    |
@@ -362,10 +384,10 @@ following table to decide the outcome of role selection negotiation:
 
 As can be seen there are four possible outcomes:
 
-* *Requestor* is SCU, *acceptor* is SCP (default roles)
-* *Requestor* is SCP, *acceptor* is SCU
-* *Requestor* and *acceptor* are both SCU/SCP
-* *Requestor* and *acceptor* are neither (context rejected)
+* *Requestor* is SCU, *Acceptor* is SCP (default roles)
+* *Requestor* is SCP, *Acceptor* is SCU
+* *Requestor* and *Acceptor* are both SCU/SCP
+* *Requestor* and *Acceptor* are neither (context rejected)
 
 .. warning::
    Role selection negotiation is not very well defined by the DICOM Standard,

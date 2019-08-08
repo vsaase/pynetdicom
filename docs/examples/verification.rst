@@ -7,15 +7,16 @@ itself and another AE by using the DIMSE C-ECHO service. It only has a single
 :ref:`supported SOP Class <verification_sops>`.
 
 The Verification Service is mostly used to verify basic connectivity and as a
-starting point when troubleshooting associations, particularly with the log
-level set to debug:
+starting point when troubleshooting associations, particularly when handlers
+are bound to the more fundamental :ref:`notification events<events_notification>`
+like  ``evt.EVT_PDU_RECV`` or ``evt.EVT_DATA_RECV`` or with the log level set
+to debug:
 
 ::
 
-    import logging
+    from pynetdicom import debug_logger
 
-    LOGGER = logging.getLogger('pynetdicom')
-    LOGGER.setLevel(logging.DEBUG)
+    debug_logger()
 
 
 Verification SCU
@@ -44,16 +45,16 @@ Verification Service.
        status = assoc.send_c_echo()
 
        # Check the status of the verification request
-       if 'Status' in status:
+       if status:
            # If the verification request succeeded this will be 0x0000
            print('C-ECHO request status: 0x{0:04x}'.format(status.Status))
        else:
-           print('Connection timed out or invalid response from peer')
+           print('Connection timed out, was aborted or received invalid response')
 
        # Release the association
        assoc.release()
    else:
-       print('Association rejected or aborted')
+       print('Association rejected, aborted or never connected')
 
 You can also use the inbuilt ``VerificationPresentationContexts`` when setting
 the requested contexts.
@@ -66,62 +67,47 @@ the requested contexts.
    ae.requested_contexts = VerificationPresentationContexts
 
 
+.. _example_verification_scp:
+
 Verification SCP
 ................
 
 Create an :ref:`AE <ae>` that supports the Verification Service and then listen for
 association requests on port 11112. When a verification request is received
-over the association we rely on the default implementation of ``AE.on_c_echo``
+over the association we rely on the default handler bound to ``evt.EVT_C_ECHO``
 to return an 0x0000 *Success* :ref:`status <verification_statuses>`.
 
 .. code-block:: python
 
-   from pynetdicom import AE
-   from pynetdicom.sop_class import VerificationSOPClass
+    from pynetdicom import AE
+    from pynetdicom.sop_class import VerificationSOPClass
 
-   # Initialise the Application Entity and specify the listen port
-   ae = AE()
+    # Initialise the Application Entity
+    ae = AE()
 
-   # Add the supported presentation context
-   ae.add_supported_context(VerificationSOPClass)
+    # Add the supported presentation context
+    ae.add_supported_context(VerificationSOPClass)
 
-   # Start listening for incoming association requests
-   ae.start_server(('', 11112))
+   # Start listening for incoming association requests in blocking mode
+   ae.start_server(('', 11112), block=True)
 
-You can also optionally implement the ``on_c_echo`` callback.
+You can also optionally bind your own handler to ``evt.EVT_C_ECHO``. Check the
+`handler implementation documentation
+<../reference/generated/pynetdicom._handlers.doc_handle_echo.html>`_
+to see the requirements for the ``evt.EVT_C_ECHO`` handler.
 
 .. code-block:: python
 
-   from pynetdicom import AE
-   from pynetdicom.sop_class import VerificationSOPClass
+    from pynetdicom import AE, evt
+    from pynetdicom.sop_class import VerificationSOPClass
 
-   # Initialise the Application Entity and specify the listen port
-   ae = AE()
+    # Implement a handler for evt.EVT_C_ECHO
+    def handle_echo(event):
+        """Handle a C-ECHO request event."""
+        return 0x0000
 
-   # Add the supported presentation context
-   ae.add_supported_context(VerificationSOPClass)
+    handlers = [(evt.EVT_C_ECHO, handle_echo)]
 
-   def on_c_echo(context, info):
-       """Respond to a C-ECHO service request.
-
-       Parameters
-       ----------
-       context : namedtuple
-           The presentation context that the verification request was sent under.
-       info : dict
-           Information about the association and verification request.
-
-       Returns
-       -------
-       status : int or pydicom.dataset.Dataset
-           The status returned to the peer AE in the C-ECHO response. Must be
-           a valid C-ECHO status value for the applicable Service Class as
-           either an ``int`` or a ``Dataset`` object containing (at a
-           minimum) a (0000,0900) *Status* element.
-       """
-       return 0x0000
-
-   ae.on_c_echo = on_c_echo
-
-   # Start listening for incoming association requests
-   ae.start_server(('', 11112))
+    ae = AE()
+    ae.add_supported_context(VerificationSOPClass)
+    ae.start_server(('', 11112), evt_handlers=handlers)

@@ -6,6 +6,7 @@
 
 import argparse
 import logging
+from logging.config import fileConfig
 import os
 import socket
 import sys
@@ -18,20 +19,13 @@ from pydicom.uid import (
 )
 
 from pynetdicom import (
-    AE,
+    AE, evt,
     QueryRetrievePresentationContexts,
     StoragePresentationContexts
 )
 
-LOGGER = logging.Logger('movescp')
-stream_logger = logging.StreamHandler()
-formatter = logging.Formatter('%(levelname).1s: %(message)s')
-stream_logger.setFormatter(formatter)
-LOGGER.addHandler(stream_logger)
-LOGGER.setLevel(logging.ERROR)
 
-
-VERSION = '0.3.0'
+VERSION = '0.4.1'
 
 
 def _setup_argparser():
@@ -122,16 +116,54 @@ def _setup_argparser():
 
 args = _setup_argparser()
 
+# Logging/Output
+def setup_logger():
+    """Setup the echoscu logging"""
+    logger = logging.Logger('movescp')
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('%(levelname).1s: %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    logger.setLevel(logging.ERROR)
+
+    return logger
+
+APP_LOGGER = setup_logger()
+
+def _setup_logging(level):
+    APP_LOGGER.setLevel(level)
+    pynetdicom_logger = logging.getLogger('pynetdicom')
+    handler = logging.StreamHandler()
+    pynetdicom_logger.setLevel(level)
+    formatter = logging.Formatter('%(levelname).1s: %(message)s')
+    handler.setFormatter(formatter)
+    pynetdicom_logger.addHandler(handler)
+
+if args.quiet:
+    for hh in APP_LOGGER.handlers:
+        APP_LOGGER.removeHandler(hh)
+
+    APP_LOGGER.addHandler(logging.NullHandler())
+
 if args.verbose:
-    LOGGER.setLevel(logging.INFO)
+    _setup_logging(logging.INFO)
 
 if args.debug:
-    LOGGER.setLevel(logging.DEBUG)
-    pynetdicom_logger = logging.getLogger('pynetdicom')
-    pynetdicom_logger.setLevel(logging.DEBUG)
+    _setup_logging(logging.DEBUG)
 
-LOGGER.debug('$movescp.py v{0!s}'.format(VERSION))
-LOGGER.debug('')
+if args.log_level:
+    levels = {'critical' : logging.CRITICAL,
+              'error'    : logging.ERROR,
+              'warn'     : logging.WARNING,
+              'info'     : logging.INFO,
+              'debug'    : logging.DEBUG}
+    _setup_logging(levels[args.log_level])
+
+if args.log_config:
+    fileConfig(args.log_config)
+
+APP_LOGGER.debug('$movescp.py v{0!s}'.format(VERSION))
+APP_LOGGER.debug('')
 
 # Validate port
 if isinstance(args.port, int):
@@ -141,7 +173,7 @@ if isinstance(args.port, int):
         test_socket.bind((os.popen('hostname').read()[:-1], args.port))
         test_socket.close()
     except socket.error:
-        LOGGER.error("Cannot listen on port {0:d}, insufficient priveleges".format(args.port))
+        APP_LOGGER.error("Cannot listen on port {0:d}, insufficient priveleges".format(args.port))
         sys.exit()
 
 # Set Transfer Syntax options
@@ -160,15 +192,18 @@ if args.prefer_big and ExplicitVRBigEndian in transfer_syntax:
         transfer_syntax.remove(ExplicitVRBigEndian)
         transfer_syntax.insert(0, ExplicitVRBigEndian)
 
-def on_c_move(dataset, move_aet, context, info):
-    """Implement the on_c_move callback"""
-    basedir = '../../tests/dicom_files/'
+def handle_move(event):
+    """Implement the evt.EVT_C_MOVE handler"""
+
+    APP_DIR = os.path.join(os.path.dirname(__file__))
+    DATA_DIR = os.path.join(APP_DIR, '../', '../', 'tests', 'dicom_files')
     dcm_files = ['RTImageStorage.dcm']
-    dcm_files = [os.path.join(basedir, x) for x in dcm_files]
+    dcm_files = [os.path.join(DATA_DIR, x) for x in dcm_files]
 
     # Address and port to send to
-    if move_aet == b'ANY-SCP         ':
-        yield '127.0.0.1', 104
+    move_destination = event.request.MoveDestination
+    if move_destination == b'ANY-SCP         ':
+        yield '127.0.0.1', 11113
     else:
         yield None, None
 
@@ -180,10 +215,14 @@ def on_c_move(dataset, move_aet, context, info):
         ds = dcmread(dcm, force=True)
         yield 0xff00, ds
 
+
+handlers = [(evt.EVT_C_MOVE, handle_move)]
+
 # Create application entity
 ae = AE(ae_title=args.aetitle)
 
 # Add the requested Storage Service presentation contexts
+# Used when sending the dataset to the move destination Storage SCP
 for context in StoragePresentationContexts:
     ae.add_requested_context(context.abstract_syntax, transfer_syntax)
 
@@ -198,6 +237,4 @@ ae.network_timeout = args.timeout
 ae.acse_timeout = args.acse_timeout
 ae.dimse_timeout = args.dimse_timeout
 
-ae.on_c_move = on_c_move
-
-ae.start_server(('', args.port))
+ae.start_server(('', args.port), evt_handlers=handlers)

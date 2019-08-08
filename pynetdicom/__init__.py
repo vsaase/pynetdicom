@@ -24,21 +24,47 @@ assert PYNETDICOM_IMPLEMENTATION_UID.is_valid
 import logging
 
 # Convenience imports
+from pynetdicom import events as evt
 from pynetdicom.ae import ApplicationEntity as AE
 from pynetdicom.association import Association
 from pynetdicom.presentation import (
     build_context,
+    build_role,
     DEFAULT_TRANSFER_SYNTAXES,
-    VerificationPresentationContexts,
-    StoragePresentationContexts,
-    QueryRetrievePresentationContexts,
+    ApplicationEventLoggingPresentationContexts,
     BasicWorklistManagementPresentationContexts,
-    RelevantPatientInformationPresentationContexts,
-    SubstanceAdministrationPresentationContexts,
-    NonPatientObjectPresentationContexts,
-    HangingProtocolPresentationContexts,
-    DefinedProcedureProtocolPresentationContexts,
     ColorPalettePresentationContexts,
-    ImplantTemplatePresentationContexts,
+    DefinedProcedureProtocolPresentationContexts,
     DisplaySystemPresentationContexts,
+    HangingProtocolPresentationContexts,
+    ImplantTemplatePresentationContexts,
+    InstanceAvailabilityPresentationContexts,
+    MediaCreationManagementPresentationContexts,
+    MediaStoragePresentationContexts,
+    NonPatientObjectPresentationContexts,
+    PrintManagementPresentationContexts,
+    ProcedureStepPresentationContexts,
+    ProtocolApprovalPresentationContexts,
+    QueryRetrievePresentationContexts,
+    RelevantPatientInformationPresentationContexts,
+    RTMachineVerificationPresentationContexts,
+    StoragePresentationContexts,
+    StorageCommitmentPresentationContexts,
+    SubstanceAdministrationPresentationContexts,
+    UnifiedProcedurePresentationContexts,
+    VerificationPresentationContexts,
 )
+
+
+# Setup default logging
+logging.getLogger('pynetdicom').addHandler(logging.NullHandler())
+
+
+def debug_logger():
+    """Setup the logger for debugging."""
+    logger = logging.getLogger('pynetdicom')
+    handler = logging.StreamHandler()
+    logger.setLevel(logging.DEBUG)
+    formatter = logging.Formatter('%(levelname).1s: %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)

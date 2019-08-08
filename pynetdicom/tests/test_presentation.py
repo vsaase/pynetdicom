@@ -7,25 +7,37 @@ import pytest
 from pydicom._uid_dict import UID_dictionary
 from pydicom.uid import UID
 
-from pynetdicom import StoragePresentationContexts
+from pynetdicom import AE, _config
+from pynetdicom.pdu_primitives import SCP_SCU_RoleSelectionNegotiation
 from pynetdicom.presentation import (
+    build_context,
+    build_role,
     PresentationContext,
     negotiate_as_acceptor,
     negotiate_as_requestor,
     DEFAULT_TRANSFER_SYNTAXES,
-    VerificationPresentationContexts,
-    StoragePresentationContexts,
-    QueryRetrievePresentationContexts,
+    ApplicationEventLoggingPresentationContexts,
     BasicWorklistManagementPresentationContexts,
-    RelevantPatientInformationPresentationContexts,
-    SubstanceAdministrationPresentationContexts,
-    NonPatientObjectPresentationContexts,
-    HangingProtocolPresentationContexts,
-    DefinedProcedureProtocolPresentationContexts,
     ColorPalettePresentationContexts,
-    ImplantTemplatePresentationContexts,
+    DefinedProcedureProtocolPresentationContexts,
     DisplaySystemPresentationContexts,
-    build_context,
+    HangingProtocolPresentationContexts,
+    ImplantTemplatePresentationContexts,
+    InstanceAvailabilityPresentationContexts,
+    MediaCreationManagementPresentationContexts,
+    MediaStoragePresentationContexts,
+    NonPatientObjectPresentationContexts,
+    PrintManagementPresentationContexts,
+    ProcedureStepPresentationContexts,
+    ProtocolApprovalPresentationContexts,
+    QueryRetrievePresentationContexts,
+    RelevantPatientInformationPresentationContexts,
+    RTMachineVerificationPresentationContexts,
+    StoragePresentationContexts,
+    StorageCommitmentPresentationContexts,
+    SubstanceAdministrationPresentationContexts,
+    UnifiedProcedurePresentationContexts,
+    VerificationPresentationContexts,
 )
 from pynetdicom.sop_class import (
     VerificationSOPClass,
@@ -49,6 +61,12 @@ def good_init(request):
 
 class TestPresentationContext(object):
     """Test the PresentationContext class"""
+    def setup(self):
+        self.default_conformance = _config.ENFORCE_UID_CONFORMANCE
+
+    def teardown(self):
+        _config.ENFORCE_UID_CONFORMANCE = self.default_conformance
+
     def test_setter(self, good_init):
         """Test the presentation context class init"""
         (context_id, abs_syn, tran_syn) = good_init
@@ -72,29 +90,45 @@ class TestPresentationContext(object):
         pc.add_transfer_syntax('1.2.840.10008.1.2')
         pc.add_transfer_syntax(b'1.2.840.10008.1.2.1')
         pc.add_transfer_syntax(UID('1.2.840.10008.1.2.2'))
-        pc.add_transfer_syntax(UID(''))
 
         # Test adding an invalid value
         pc.add_transfer_syntax(1234)
         assert 1234 not in pc.transfer_syntax
 
-    @pytest.mark.skipif(sys.version_info[:2] == (3, 4),
-                        reason='pytest missing caplog')
     def test_add_transfer_syntax_nonconformant(self, caplog):
         """Test adding non-conformant transfer syntaxes"""
+        _config.ENFORCE_UID_CONFORMANCE = True
+
         caplog.set_level(logging.DEBUG, logger='pynetdicom.presentation')
         pc = PresentationContext()
         pc.context_id = 1
-        pc.add_transfer_syntax('1.2.3.')
-        assert ("A non-conformant UID has been added to 'transfer_syntax'"
-            in caplog.text)
+
+        msg = r"'transfer_syntax' contains an invalid UID"
+        with pytest.raises(ValueError, match=msg):
+            pc.add_transfer_syntax('1.2.3.')
+
+        assert msg in caplog.text
 
         pc.add_transfer_syntax('1.2.840.10008.1.1')
         assert ("A UID has been added to 'transfer_syntax' that is not a "
                "transfer syntax" in caplog.text)
 
+        _config.ENFORCE_UID_CONFORMANCE = False
+        pc.add_transfer_syntax('1.2.3.')
+        assert '1.2.3.' in pc.transfer_syntax
+
     def test_add_private_transfer_syntax(self):
         """Test adding private transfer syntaxes"""
+        _config.ENFORCE_UID_CONFORMANCE = False
+        pc = PresentationContext()
+        pc.context_id = 1
+        pc.add_transfer_syntax('2.16.840.1.113709.1.2.2')
+        assert '2.16.840.1.113709.1.2.2' in pc._transfer_syntax
+
+        pc.transfer_syntax = ['2.16.840.1.113709.1.2.1']
+        assert '2.16.840.1.113709.1.2.1' in pc._transfer_syntax
+
+        _config.ENFORCE_UID_CONFORMANCE = True
         pc = PresentationContext()
         pc.context_id = 1
         pc.add_transfer_syntax('2.16.840.1.113709.1.2.2')
@@ -200,18 +234,24 @@ class TestPresentationContext(object):
         with pytest.raises(TypeError):
             pc.abstract_syntax = 1234
 
-    @pytest.mark.skipif(sys.version_info[:2] == (3, 4),
-                        reason='pytest missing caplog')
     def test_abstract_syntax_nonconformant(self, caplog):
         """Test adding non-conformant abstract syntaxes"""
+        _config.ENFORCE_UID_CONFORMANCE = True
         caplog.set_level(logging.DEBUG, logger='pynetdicom.presentation')
         pc = PresentationContext()
         pc.context_id = 1
+
+        msg = r"'abstract_syntax' is an invalid UID"
+        with pytest.raises(ValueError, match=msg):
+            pc.abstract_syntax = UID('1.4.1.')
+        assert pc.abstract_syntax is None
+
+        _config.ENFORCE_UID_CONFORMANCE = False
         pc.abstract_syntax = UID('1.4.1.')
         assert pc.abstract_syntax == UID('1.4.1.')
         assert isinstance(pc.abstract_syntax, UID)
 
-        assert ("'abstract_syntax' set to a non-conformant UID" in caplog.text)
+        assert ("'abstract_syntax' is an invalid UID" in caplog.text)
 
     def test_transfer_syntax(self):
         """Test transfer syntax setter"""
@@ -240,8 +280,6 @@ class TestPresentationContext(object):
         pc.transfer_syntax = ['1.3', '1.3']
         assert pc.transfer_syntax == ['1.3']
 
-    @pytest.mark.skipif(sys.version_info[:2] == (3, 4),
-                        reason='pytest missing caplog')
     def test_transfer_syntax_nonconformant(self, caplog):
         """Test setting non-conformant transfer syntaxes"""
         caplog.set_level(logging.DEBUG, logger='pynetdicom.presentation')
@@ -1149,6 +1187,45 @@ class TestNegotiateAsRequestorWithRoleSelection(object):
         assert len(out_04) == 8
         assert len(out_na) == 0
 
+    def test_one_role_only_scu(self):
+        """Test only specifying scu_role in the role selection."""
+        ae = AE()
+        ae.add_supported_context('1.2.840.10008.1.1', scu_role=True, scp_role=True)
+        ae.add_requested_context('1.2.840.10008.1.1')
+        scp = ae.start_server(('', 11112), block=False)
+
+        role = SCP_SCU_RoleSelectionNegotiation()
+        role.sop_class_uid = '1.2.840.10008.1.1'
+        role.scu_role = True
+
+        assoc = ae.associate('localhost', 11112, ext_neg=[role])
+        assert assoc.is_established
+        cx = assoc.accepted_contexts[0]
+        assert cx.as_scu is True
+        assert cx.as_scp is False
+        assoc.release()
+
+        scp.shutdown()
+
+    def test_one_role_only_scp(self):
+        """Test only specifying scp_role in the role selection."""
+        ae = AE()
+        ae.add_supported_context('1.2.840.10008.1.1', scu_role=True, scp_role=True)
+        ae.add_requested_context('1.2.840.10008.1.1')
+        scp = ae.start_server(('', 11112), block=False)
+
+        role = SCP_SCU_RoleSelectionNegotiation()
+        role.sop_class_uid = '1.2.840.10008.1.1'
+        role.scp_role = True
+
+        assoc = ae.associate('localhost', 11112, ext_neg=[role])
+        assert assoc.is_established
+        cx = assoc.accepted_contexts[0]
+        assert cx.as_scu is False
+        assert cx.as_scp is True
+        assoc.release()
+
+        scp.shutdown()
 
 
 class TestNegotiateAsRequestor(object):
@@ -1538,41 +1615,19 @@ def test_build_context():
 
 
 class TestServiceContexts(object):
-    def test_verification(self):
-        """Test the verification service presentation contexts."""
-        contexts = VerificationPresentationContexts
-        assert len(contexts) == 1
-        assert contexts[0].abstract_syntax == '1.2.840.10008.1.1'
-        assert contexts[0].transfer_syntax == DEFAULT_TRANSFER_SYNTAXES
-        assert contexts[0].context_id is None
-
-    def test_storage(self):
-        """Test the storage service presentation contexts"""
-        contexts = StoragePresentationContexts
-        assert len(contexts) == 128
+    def test_application_event(self):
+        """Tests with application event logging presentation contexts"""
+        contexts = ApplicationEventLoggingPresentationContexts
+        assert len(contexts) == 2
 
         for context in contexts:
             assert context.transfer_syntax == DEFAULT_TRANSFER_SYNTAXES
             assert context.context_id is None
 
-        assert contexts[0].abstract_syntax == '1.2.840.10008.5.1.4.1.1.1'
-        assert contexts[80].abstract_syntax == '1.2.840.10008.5.1.4.1.1.77.1.4.1'
-        assert contexts[-1].abstract_syntax == '1.2.840.10008.5.1.4.1.1.90.1'
+        assert contexts[0].abstract_syntax == '1.2.840.10008.1.40'
+        assert contexts[1].abstract_syntax == '1.2.840.10008.1.42'
 
-    def test_qr(self):
-        """Test the query/retrieve service presentation contexts."""
-        contexts = QueryRetrievePresentationContexts
-        assert len(contexts) == 12
-
-        for context in contexts:
-            assert context.transfer_syntax == DEFAULT_TRANSFER_SYNTAXES
-            assert context.context_id is None
-
-        assert contexts[0].abstract_syntax == '1.2.840.10008.5.1.4.1.2.1.1'
-        assert contexts[4].abstract_syntax == '1.2.840.10008.5.1.4.1.2.2.2'
-        assert contexts[-1].abstract_syntax == '1.2.840.10008.5.1.4.1.2.5.3'
-
-    def test_worklist(self):
+    def test_basic_worklist(self):
         """Test the basic worklist service presentation contexts."""
         contexts = BasicWorklistManagementPresentationContexts
         assert len(contexts) == 1
@@ -1581,60 +1636,18 @@ class TestServiceContexts(object):
         assert contexts[0].context_id is None
         assert contexts[0].abstract_syntax == '1.2.840.10008.5.1.4.31'
 
-    def test_relevant_patient(self):
-        """Tests with relevant patient info presentation contexts"""
-        contexts = RelevantPatientInformationPresentationContexts
+    def test_color_palette(self):
+        """Tests with color palette presentation contexts"""
+        contexts = ColorPalettePresentationContexts
         assert len(contexts) == 3
 
         for context in contexts:
             assert context.transfer_syntax == DEFAULT_TRANSFER_SYNTAXES
             assert context.context_id is None
 
-        assert contexts[0].abstract_syntax == '1.2.840.10008.5.1.4.37.1'
-        assert contexts[1].abstract_syntax == '1.2.840.10008.5.1.4.37.2'
-        assert contexts[2].abstract_syntax == '1.2.840.10008.5.1.4.37.3'
-
-    def test_substance_admin(self):
-        """Tests with substance administration presentation contexts"""
-        contexts = SubstanceAdministrationPresentationContexts
-        assert len(contexts) == 2
-
-        for context in contexts:
-            assert context.transfer_syntax == DEFAULT_TRANSFER_SYNTAXES
-            assert context.context_id is None
-
-        assert contexts[0].abstract_syntax == '1.2.840.10008.5.1.4.41'
-        assert contexts[1].abstract_syntax == '1.2.840.10008.5.1.4.42'
-
-    def test_non_patient(self):
-        """Tests with non patient object presentation contexts"""
-        contexts = NonPatientObjectPresentationContexts
-        assert len(contexts) == 7
-
-        for context in contexts:
-            assert context.transfer_syntax == DEFAULT_TRANSFER_SYNTAXES
-            assert context.context_id is None
-
-        assert contexts[0].abstract_syntax == '1.2.840.10008.5.1.4.1.1.200.1'
-        assert contexts[1].abstract_syntax == '1.2.840.10008.5.1.4.1.1.200.3'
-        assert contexts[2].abstract_syntax == '1.2.840.10008.5.1.4.38.1'
-        assert contexts[3].abstract_syntax == '1.2.840.10008.5.1.4.39.1'
-        assert contexts[4].abstract_syntax == '1.2.840.10008.5.1.4.43.1'
-        assert contexts[5].abstract_syntax == '1.2.840.10008.5.1.4.44.1'
-        assert contexts[6].abstract_syntax == '1.2.840.10008.5.1.4.45.1'
-
-    def test_hanging_protocol(self):
-        """Tests with hanging protocol presentation contexts"""
-        contexts = HangingProtocolPresentationContexts
-        assert len(contexts) == 3
-
-        for context in contexts:
-            assert context.transfer_syntax == DEFAULT_TRANSFER_SYNTAXES
-            assert context.context_id is None
-
-        assert contexts[0].abstract_syntax == '1.2.840.10008.5.1.4.38.2'
-        assert contexts[1].abstract_syntax == '1.2.840.10008.5.1.4.38.3'
-        assert contexts[2].abstract_syntax == '1.2.840.10008.5.1.4.38.4'
+        assert contexts[0].abstract_syntax == '1.2.840.10008.5.1.4.39.2'
+        assert contexts[1].abstract_syntax == '1.2.840.10008.5.1.4.39.3'
+        assert contexts[2].abstract_syntax == '1.2.840.10008.5.1.4.39.4'
 
     def test_defined_procedure(self):
         """Tests with defined procedure protocol presentation contexts"""
@@ -1649,18 +1662,29 @@ class TestServiceContexts(object):
         assert contexts[1].abstract_syntax == '1.2.840.10008.5.1.4.20.2'
         assert contexts[2].abstract_syntax == '1.2.840.10008.5.1.4.20.3'
 
-    def test_color_palette(self):
-        """Tests with color palette presentation contexts"""
-        contexts = ColorPalettePresentationContexts
+    def test_display_system(self):
+        """Tests with display system presentation contexts"""
+        contexts = DisplaySystemPresentationContexts
+        assert len(contexts) == 1
+
+        for context in contexts:
+            assert context.transfer_syntax == DEFAULT_TRANSFER_SYNTAXES
+            assert context.context_id is None
+
+        assert contexts[0].abstract_syntax == '1.2.840.10008.5.1.1.40'
+
+    def test_hanging_protocol(self):
+        """Tests with hanging protocol presentation contexts"""
+        contexts = HangingProtocolPresentationContexts
         assert len(contexts) == 3
 
         for context in contexts:
             assert context.transfer_syntax == DEFAULT_TRANSFER_SYNTAXES
             assert context.context_id is None
 
-        assert contexts[0].abstract_syntax == '1.2.840.10008.5.1.4.39.2'
-        assert contexts[1].abstract_syntax == '1.2.840.10008.5.1.4.39.3'
-        assert contexts[2].abstract_syntax == '1.2.840.10008.5.1.4.39.4'
+        assert contexts[0].abstract_syntax == '1.2.840.10008.5.1.4.38.2'
+        assert contexts[1].abstract_syntax == '1.2.840.10008.5.1.4.38.3'
+        assert contexts[2].abstract_syntax == '1.2.840.10008.5.1.4.38.4'
 
     def test_implant_template(self):
         """Tests with implant template presentation contexts"""
@@ -1681,13 +1705,223 @@ class TestServiceContexts(object):
         assert contexts[7].abstract_syntax == '1.2.840.10008.5.1.4.45.3'
         assert contexts[8].abstract_syntax == '1.2.840.10008.5.1.4.45.4'
 
-    def test_display_system(self):
-        """Tests with display system presentation contexts"""
-        contexts = DisplaySystemPresentationContexts
+    def test_instance_availability(self):
+        """Tests with instance availability presentation contexts"""
+        contexts = InstanceAvailabilityPresentationContexts
         assert len(contexts) == 1
 
         for context in contexts:
             assert context.transfer_syntax == DEFAULT_TRANSFER_SYNTAXES
             assert context.context_id is None
 
-        assert contexts[0].abstract_syntax == '1.2.840.10008.5.1.1.40'
+        assert contexts[0].abstract_syntax == '1.2.840.10008.5.1.4.33'
+
+    def test_media_creation(self):
+        """Tests with media creation presentation contexts"""
+        contexts = MediaCreationManagementPresentationContexts
+        assert len(contexts) == 1
+
+        for context in contexts:
+            assert context.transfer_syntax == DEFAULT_TRANSFER_SYNTAXES
+            assert context.context_id is None
+
+        assert contexts[0].abstract_syntax == '1.2.840.10008.5.1.1.33'
+
+    def test_media_storage(self):
+        """Tests with media storage presentation contexts"""
+        contexts = MediaStoragePresentationContexts
+        assert len(contexts) == 1
+
+        for context in contexts:
+            assert context.transfer_syntax == DEFAULT_TRANSFER_SYNTAXES
+            assert context.context_id is None
+
+        assert contexts[0].abstract_syntax == '1.2.840.10008.1.3.10'
+
+    def test_non_patient(self):
+        """Tests with non patient object presentation contexts"""
+        contexts = NonPatientObjectPresentationContexts
+        assert len(contexts) == 7
+
+        for context in contexts:
+            assert context.transfer_syntax == DEFAULT_TRANSFER_SYNTAXES
+            assert context.context_id is None
+
+        assert contexts[0].abstract_syntax == '1.2.840.10008.5.1.4.1.1.200.1'
+        assert contexts[1].abstract_syntax == '1.2.840.10008.5.1.4.1.1.200.3'
+        assert contexts[2].abstract_syntax == '1.2.840.10008.5.1.4.38.1'
+        assert contexts[3].abstract_syntax == '1.2.840.10008.5.1.4.39.1'
+        assert contexts[4].abstract_syntax == '1.2.840.10008.5.1.4.43.1'
+        assert contexts[5].abstract_syntax == '1.2.840.10008.5.1.4.44.1'
+        assert contexts[6].abstract_syntax == '1.2.840.10008.5.1.4.45.1'
+
+    def test_print_management(self):
+        """Tests with print management presentation contexts"""
+        contexts = PrintManagementPresentationContexts
+        assert len(contexts) == 11
+
+        for context in contexts:
+            assert context.transfer_syntax == DEFAULT_TRANSFER_SYNTAXES
+            assert context.context_id is None
+
+        assert contexts[0].abstract_syntax == '1.2.840.10008.5.1.1.1'
+        assert contexts[1].abstract_syntax == '1.2.840.10008.5.1.1.14'
+        assert contexts[2].abstract_syntax == '1.2.840.10008.5.1.1.15'
+        assert contexts[3].abstract_syntax == '1.2.840.10008.5.1.1.16'
+        assert contexts[4].abstract_syntax == '1.2.840.10008.5.1.1.16.376'
+        assert contexts[5].abstract_syntax == '1.2.840.10008.5.1.1.18'
+        assert contexts[6].abstract_syntax == '1.2.840.10008.5.1.1.2'
+        assert contexts[7].abstract_syntax == '1.2.840.10008.5.1.1.23'
+        assert contexts[8].abstract_syntax == '1.2.840.10008.5.1.1.4'
+        assert contexts[9].abstract_syntax == '1.2.840.10008.5.1.1.4.1'
+        assert contexts[10].abstract_syntax == '1.2.840.10008.5.1.1.9'
+
+    def test_procedure_step(self):
+        """Tests with procedure step presentation contexts"""
+        contexts = ProcedureStepPresentationContexts
+        assert len(contexts) == 3
+
+        for context in contexts:
+            assert context.transfer_syntax == DEFAULT_TRANSFER_SYNTAXES
+            assert context.context_id is None
+
+        assert contexts[0].abstract_syntax == '1.2.840.10008.3.1.2.3.3'
+        assert contexts[1].abstract_syntax == '1.2.840.10008.3.1.2.3.4'
+        assert contexts[2].abstract_syntax == '1.2.840.10008.3.1.2.3.5'
+
+    def test_protocol_approval(self):
+        """Tests with protocol approval presentation contexts"""
+        contexts = ProtocolApprovalPresentationContexts
+        assert len(contexts) == 3
+
+        for context in contexts:
+            assert context.transfer_syntax == DEFAULT_TRANSFER_SYNTAXES
+            assert context.context_id is None
+
+        assert contexts[0].abstract_syntax == '1.2.840.10008.5.1.4.1.1.200.4'
+        assert contexts[1].abstract_syntax == '1.2.840.10008.5.1.4.1.1.200.5'
+        assert contexts[2].abstract_syntax == '1.2.840.10008.5.1.4.1.1.200.6'
+
+    def test_qr(self):
+        """Test the query/retrieve service presentation contexts."""
+        contexts = QueryRetrievePresentationContexts
+        assert len(contexts) == 12
+
+        for context in contexts:
+            assert context.transfer_syntax == DEFAULT_TRANSFER_SYNTAXES
+            assert context.context_id is None
+
+        assert contexts[0].abstract_syntax == '1.2.840.10008.5.1.4.1.2.1.1'
+        assert contexts[4].abstract_syntax == '1.2.840.10008.5.1.4.1.2.2.2'
+        assert contexts[-1].abstract_syntax == '1.2.840.10008.5.1.4.1.2.5.3'
+
+    def test_relevant_patient(self):
+        """Tests with relevant patient info presentation contexts"""
+        contexts = RelevantPatientInformationPresentationContexts
+        assert len(contexts) == 3
+
+        for context in contexts:
+            assert context.transfer_syntax == DEFAULT_TRANSFER_SYNTAXES
+            assert context.context_id is None
+
+        assert contexts[0].abstract_syntax == '1.2.840.10008.5.1.4.37.1'
+        assert contexts[1].abstract_syntax == '1.2.840.10008.5.1.4.37.2'
+        assert contexts[2].abstract_syntax == '1.2.840.10008.5.1.4.37.3'
+
+    def test_rt_machine(self):
+        """Tests with RT machine verification presentation contexts"""
+        contexts = RTMachineVerificationPresentationContexts
+        assert len(contexts) == 2
+
+        for context in contexts:
+            assert context.transfer_syntax == DEFAULT_TRANSFER_SYNTAXES
+            assert context.context_id is None
+
+        assert contexts[0].abstract_syntax == '1.2.840.10008.5.1.4.34.8'
+        assert contexts[1].abstract_syntax == '1.2.840.10008.5.1.4.34.9'
+
+    def test_storage(self):
+        """Test the storage service presentation contexts"""
+        contexts = StoragePresentationContexts
+        assert len(contexts) == 128
+
+        for context in contexts:
+            assert context.transfer_syntax == DEFAULT_TRANSFER_SYNTAXES
+            assert context.context_id is None
+
+        assert contexts[0].abstract_syntax == '1.2.840.10008.5.1.4.1.1.1'
+        assert contexts[80].abstract_syntax == '1.2.840.10008.5.1.4.1.1.77.1.4.1'
+        assert contexts[-1].abstract_syntax == '1.2.840.10008.5.1.4.1.1.90.1'
+
+    def test_storage_commitement(self):
+        """Tests with storage commitment presentation contexts"""
+        contexts = StorageCommitmentPresentationContexts
+        assert len(contexts) == 1
+
+        for context in contexts:
+            assert context.transfer_syntax == DEFAULT_TRANSFER_SYNTAXES
+            assert context.context_id is None
+
+        assert contexts[0].abstract_syntax == '1.2.840.10008.1.20.1'
+
+    def test_substance_admin(self):
+        """Tests with substance administration presentation contexts"""
+        contexts = SubstanceAdministrationPresentationContexts
+        assert len(contexts) == 2
+
+        for context in contexts:
+            assert context.transfer_syntax == DEFAULT_TRANSFER_SYNTAXES
+            assert context.context_id is None
+
+        assert contexts[0].abstract_syntax == '1.2.840.10008.5.1.4.41'
+        assert contexts[1].abstract_syntax == '1.2.840.10008.5.1.4.42'
+
+    def test_unified_procedure(self):
+        """Tests with unified procedure presentation contexts"""
+        contexts = UnifiedProcedurePresentationContexts
+        assert len(contexts) == 4
+
+        for context in contexts:
+            assert context.transfer_syntax == DEFAULT_TRANSFER_SYNTAXES
+            assert context.context_id is None
+
+        assert contexts[0].abstract_syntax == '1.2.840.10008.5.1.4.34.6.1'
+        assert contexts[1].abstract_syntax == '1.2.840.10008.5.1.4.34.6.2'
+        assert contexts[2].abstract_syntax == '1.2.840.10008.5.1.4.34.6.3'
+        assert contexts[3].abstract_syntax == '1.2.840.10008.5.1.4.34.6.4'
+
+    def test_verification(self):
+        """Test the verification service presentation contexts."""
+        contexts = VerificationPresentationContexts
+        assert len(contexts) == 1
+        assert contexts[0].abstract_syntax == '1.2.840.10008.1.1'
+        assert contexts[0].transfer_syntax == DEFAULT_TRANSFER_SYNTAXES
+        assert contexts[0].context_id is None
+
+
+class TestBuildRole(object):
+    """Tests for presentation.build_role."""
+    def test_default(self):
+        """Test the default role."""
+        role = build_role('1.2.3')
+
+        assert role.sop_class_uid == '1.2.3'
+        assert role.scu_role is False
+        assert role.scp_role is False
+
+    def test_various(self):
+        """Test various combinations of role."""
+        role = build_role('1.2.3', scu_role=True)
+        assert role.sop_class_uid == '1.2.3'
+        assert role.scu_role is True
+        assert role.scp_role is False
+
+        role = build_role('1.2.3', scp_role=True)
+        assert role.sop_class_uid == '1.2.3'
+        assert role.scu_role is False
+        assert role.scp_role is True
+
+        role = build_role('1.2.3', scu_role=True, scp_role=True)
+        assert role.sop_class_uid == '1.2.3'
+        assert role.scu_role is True
+        assert role.scp_role is True

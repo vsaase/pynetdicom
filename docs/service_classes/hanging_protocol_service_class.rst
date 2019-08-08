@@ -1,55 +1,49 @@
-.. _color_sops:
-
-Color Palette Query/Retrieve Service Class
-==========================================
-The `Color Palette Query/Retrieve Service Class <http://dicom.nema.org/medical/dicom/current/output/html/part04.html#chapter_X>`_
-defines a service that facilitates access to Color Palette objects.
+Hanging Protocol Query/Retrieve Service Class
+=======================================================
+The `Hanging Protocol Query/Retrieve Service Class <http://dicom.nema.org/medical/dicom/current/output/html/part04.html#chapter_U>`_
+defines a service that facilitates access to Hanging Protocol objects.
 
 Supported SOP Classes
 ---------------------
 
-.. _color_find_sops:
+.. _hang_sops:
 
-Color Palette Query/Retrieve (Find) SOP Classes
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
++-----------------------------+-----------------------------------------------+
+| UID                         | SOP Class                                     |
++=============================+===============================================+
+| 1.2.840.10008.5.1.4.38.2    | HangingProtocolInformationModelFind           |
++-----------------------------+-----------------------------------------------+
+| 1.2.840.10008.5.1.4.38.3    | HangingProtocolInformationModelMove           |
++-----------------------------+-----------------------------------------------+
+| 1.2.840.10008.5.1.4.38.4    | HangingProtocolInformationModelGet            |
++-----------------------------+-----------------------------------------------+
 
-+-----------------------------+----------------------------------+
-| UID                         | SOP Class                        |
-+=============================+==================================+
-| 1.2.840.10008.5.1.4.39.2    | ColorPaletteInformationModelFind |
-+-----------------------------+----------------------------------+
+DIMSE Services
+--------------
 
-
-.. _color_move_sops:
-
-Color Palette Query/Retrieve (Move) SOP Classes
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-+-----------------------------+---------------------------------------+
-| UID                         | SOP Class                             |
-+=============================+=======================================+
-| 1.2.840.10008.5.1.4.39.3    | ColorPaletteInformationModelMove      |
-+-----------------------------+---------------------------------------+
-
-
-.. _color_get_sops:
-
-Color Palette Query/Retrieve (Get) SOP Classes
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-+-----------------------------+---------------------------------------+
-| UID                         | SOP Class                             |
-+=============================+=======================================+
-| 1.2.840.10008.5.1.4.39.4    | ColorPaletteInformationModelGet       |
-+-----------------------------+---------------------------------------+
++-----------------+-----------------------------------------+
+| DIMSE Service   | Usage SCU/SCP                           |
++=================+=========================================+
+| *Hanging Protocol Information Model - Find*               |
++-----------------+-----------------------------------------+
+| C-FIND          | Mandatory/Mandatory                     |
++-----------------+-----------------------------------------+
+| *Hanging Protocol Information Model - Move*               |
++-----------------+-----------------------------------------+
+| C-MOVE          | Mandatory/Mandatory                     |
++-----------------+-----------------------------------------+
+| *Hanging Protocol Information Model - Get*                |
++-----------------+-----------------------------------------+
+| C-GET           | Mandatory/Mandatory                     |
++-----------------+-----------------------------------------+
 
 
-.. _color_statuses:
+.. _hang_statuses:
 
 Statuses
 --------
 
-.. _color_find_statuses:
+.. _hang_find_statuses:
 
 C-FIND Statuses
 ~~~~~~~~~~~~~~~~
@@ -64,8 +58,8 @@ C-FIND Statuses
 | 0xFE00     | Cancel   | Processing has been terminated   |
 +------------+----------+----------------------------------+
 
-Color Palette Query/Retrieve (Find) Service Statuses
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Hanging Protocol Query/Retrieve (Find) Service Statuses
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 +------------------+----------+----------------------------------------------+
 | Code (hex)       | Category | Description                                  |
@@ -82,37 +76,36 @@ Color Palette Query/Retrieve (Find) Service Statuses
 |                  |          | keys was not supported                       |
 +------------------+----------+----------------------------------------------+
 
-pynetdicom Color Palette Query/Retrieve (Find) Statuses
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+pynetdicom Hanging Protocol Query/Retrieve (Find) Statuses
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-When pynetdicom is acting as a Color Palette Query/Retrieve (Find) SCP it uses
-the following status codes values to indicate the corresponding issue has
-occurred to help aid in debugging.
+When pynetdicom is acting as a Hanging Protocol Query/Retrieve (Find)
+SCP it uses the following status codes values to indicate the corresponding
+issue has occurred to help aid in debugging.
 
 +------------------+----------+-----------------------------------------------+
 | Code (hex)       | Category | Description                                   |
 +==================+==========+===============================================+
-| 0xC001           | Failure  | User's callback implementation returned a     |
+| 0xC001           | Failure  | Handler bound to ``evt.EVT_C_FIND`` yielded a |
 |                  |          | status Dataset with no (0000,0900) *Status*   |
 |                  |          | element                                       |
 +------------------+----------+-----------------------------------------------+
-| 0xC002           | Failure  | User's callback implementation returned an    |
+| 0xC002           | Failure  | Handler bound to ``evt.EVT_C_FIND`` yielded an|
 |                  |          | invalid status object (not a pydicom Dataset  |
 |                  |          | or an int)                                    |
 +------------------+----------+-----------------------------------------------+
 | 0xC310           | Failure  | Failed to decode the dataset received from    |
 |                  |          | the peer                                      |
 +------------------+----------+-----------------------------------------------+
-| 0xC311           | Failure  | Unhandled exception raised by the user's      |
-|                  |          | implementation of the ``on_c_find`` callback  |
+| 0xC311           | Failure  | Unhandled exception raised by the handler     |
+|                  |          | bound to ``evt.EVT_C_FIND``                   |
 +------------------+----------+-----------------------------------------------+
 | 0xC312           | Failure  | Failed to encode the dataset received from    |
-|                  |          | the user's implementation of the ``on_c_find``|
-|                  |          | callback                                      |
+|                  |          | the handler bound to ``evt.EVT_C_FIND``       |
 +------------------+----------+-----------------------------------------------+
 
 
-.. _color_get_statuses:
+.. _hang_get_statuses:
 
 C-GET Statuses
 ~~~~~~~~~~~~~~
@@ -133,8 +126,8 @@ C-GET Statuses
 | 0xFE00     | Cancel   | Sub-operations terminated        |
 +------------+----------+----------------------------------+
 
-Color Palette Query/Retrieve (Get) Service Statuses
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Hanging Protocol Query/Retrieve (Get) Service Statuses
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 +------------------+----------+----------------------------------------------+
 | Code (hex)       | Category | Description                                  |
@@ -155,33 +148,32 @@ Color Palette Query/Retrieve (Get) Service Statuses
 | 0xFF00           | Pending  | Sub-operations are continuing                |
 +------------------+----------+----------------------------------------------+
 
-pynetdicom Color Palette Query/Retrieve (Get) Statuses
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+pynetdicom Hanging Protocol Query/Retrieve (Get) Statuses
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 +------------------+----------+-----------------------------------------------+
 | Code (hex)       | Category | Description                                   |
 +==================+==========+===============================================+
-| 0xC001           | Failure  | User's callback implementation returned a     |
+| 0xC001           | Failure  | Handler bound to ``evt.EVT_C_GET`` yielded a  |
 |                  |          | status Dataset with no (0000,0900) *Status*   |
 |                  |          | element                                       |
 +------------------+----------+-----------------------------------------------+
-| 0xC002           | Failure  | User's callback implementation returned an    |
+| 0xC002           | Failure  | Handler bound to ``evt.EVT_C_GET`` yielded an |
 |                  |          | invalid status object (not a pydicom Dataset  |
 |                  |          | or an int)                                    |
 +------------------+----------+-----------------------------------------------+
 | 0xC410           | Failure  | Failed to decode the dataset received from    |
 |                  |          | the peer                                      |
 +------------------+----------+-----------------------------------------------+
-| 0xC411           | Failure  | Unhandled exception raised by the user's      |
-|                  |          | implementation of the ``on_c_get`` callback   |
+| 0xC411           | Failure  | Unhandled exception raised by the handler     |
+|                  |          | bound to ``evt.EVT_C_GET``                    |
 +------------------+----------+-----------------------------------------------+
-| 0xC413           | Failure  | The user's implementation oc the ``on_c_get`` |
-|                  |          | callback yielded an invalid number of         |
-|                  |          | sub-operations                                |
+| 0xC413           | Failure  | The handler bound to ``evt.EVT_C_GET``        |
+|                  |          | yielded an invalid number of sub-operations   |
 +------------------+----------+-----------------------------------------------+
 
 
-.. _color_move_statuses:
+.. _hang_move_statuses:
 
 C-MOVE Statuses
 ~~~~~~~~~~~~~~~
@@ -204,8 +196,8 @@ C-MOVE Statuses
 | 0xFE00     | Cancel   | Sub-operations terminated        |
 +------------+----------+----------------------------------+
 
-Color Palette Query/Retrieve (Move) Service Statuses
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Hanging Protocol Query/Retrieve (Move) Service Statuses
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 +------------------+----------+----------------------------------------------+
 | Code (hex)       | Category | Description                                  |
@@ -228,47 +220,43 @@ Color Palette Query/Retrieve (Move) Service Statuses
 | 0xFF00           | Pending  | Sub-operations are continuing                |
 +------------------+----------+----------------------------------------------+
 
-pynetdicom Color Palette Query/Retrieve (Move) Statuses
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+pynetdicom Hanging Protocol Query/Retrieve (Move) Statuses
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 +------------------+----------+-----------------------------------------------+
 | Code (hex)       | Category | Description                                   |
 +==================+==========+===============================================+
-| 0xC001           | Failure  | User's callback implementation returned a     |
+| 0xC001           | Failure  | Handler bound to ``evt.EVT_C_MOVE`` yielded a |
 |                  |          | status Dataset with no (0000,0900) *Status*   |
 |                  |          | element                                       |
 +------------------+----------+-----------------------------------------------+
-| 0xC002           | Failure  | User's callback implementation returned an    |
+| 0xC002           | Failure  | Handler bound to ``evt.EVT_C_MOVE`` yielded an|
 |                  |          | invalid status object (not a pydicom Dataset  |
 |                  |          | or an int)                                    |
 +------------------+----------+-----------------------------------------------+
 | 0xC510           | Failure  | Failed to decode the dataset received from    |
 |                  |          | the peer                                      |
 +------------------+----------+-----------------------------------------------+
-| 0xC511           | Failure  | Unhandled exception raised by the user's      |
-|                  |          | implementation of the ``on_c_get`` callback   |
+| 0xC511           | Failure  | Unhandled exception raised by the handler     |
+|                  |          | bound to ``evt.EVT_C_MOVE``                   |
 +------------------+----------+-----------------------------------------------+
-| 0xC513           | Failure  | The user's implementation oc the ``on_c_move``|
-|                  |          | callback yielded an invalid number of         |
-|                  |          | sub-operations                                |
+| 0xC513           | Failure  | The handler bound to ``evt.EVT_C_MOVE``       |
+|                  |          | yielded an invalid number of sub-operations   |
 +------------------+----------+-----------------------------------------------+
-| 0xC514           | Failure  | The user's implementation oc the ``on_c_move``|
-|                  |          | callback failed to yield the (address, port)  |
+| 0xC514           | Failure  | The handler bound to ``evt.EVT_C_MOVE``       |
+|                  |          | failed to yield the (address, port)           |
 |                  |          | and/or the number of sub-operations           |
 +------------------+----------+-----------------------------------------------+
-| 0xC515           | Failure  | The user's implementation oc the ``on_c_move``|
-|                  |          | callback failed to yield a valid (address,    |
-|                  |          | port) pair                                    |
+| 0xC515           | Failure  | The handler bound to ``evt.EVT_C_MOVE``       |
+|                  |          | failed to yield a valid (address, port) pair  |
 +------------------+----------+-----------------------------------------------+
-
-
 
 
 References
 ----------
 
 * DICOM Standard, Part 4, `Annex C <http://dicom.nema.org/medical/dicom/current/output/html/part04.html#chapter_C>`_
-* DICOM Standard, Part 4, `Annex X <http://dicom.nema.org/medical/dicom/current/output/html/part04.html#chapter_X>`_
+* DICOM Standard, Part 4, `Annex U <http://dicom.nema.org/medical/dicom/current/output/html/part04.html#chapter_U>`_
 * DICOM Standard, Part 7, Sections
   `9.1.2.1.5 <http://dicom.nema.org/medical/dicom/current/output/chtml/part07/chapter_9.html#sect_9.1.2.1.5>`_,
   `9.1.3.1.6 <http://dicom.nema.org/medical/dicom/current/output/chtml/part07/chapter_9.html#sect_9.1.3.1.6>`_ and

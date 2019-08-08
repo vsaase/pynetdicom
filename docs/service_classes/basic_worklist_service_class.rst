@@ -1,33 +1,35 @@
-.. _relpat_service:
+Basic Worklist Management Service Class
+=======================================
+The `Basic Worklist Management Service Class <http://dicom.nema.org/medical/dicom/current/output/html/part04.html#chapter_K>`_
+defines a service that facilitates
+access to worklists, where a worklist is a structure that presents information
+related to a particular set of tasks and the particular details of each task.
 
-Relevant Patient Information Query Service Class
-================================================
-The `Relevant Patient Information Query Service Class
-<http://dicom.nema.org/medical/dicom/current/output/html/part04.html#chapter_Q>`_
-defines a service that facilitates querying of stored Instances for specific
-information from a single patient.
-
-
-.. _relpat_sops:
+.. _worklist_sops:
 
 Supported SOP Classes
 ---------------------
 
-+-----------------------------+----------------------------------------------+
-| UID                         | SOP Class                                    |
-+=============================+==============================================+
-| 1.2.840.10008.5.1.4.37.1    | GeneralRelevantPatientInformationQuery       |
-+-----------------------------+----------------------------------------------+
-| 1.2.840.10008.5.1.4.37.2    | BreastImagingRelevantPatientInformationQuery |
-+-----------------------------+----------------------------------------------+
-| 1.2.840.10008.5.1.4.37.3    | CardiacRelevantPatientInformationQuery       |
-+-----------------------------+----------------------------------------------+
++-----------------------------+-----------------------------------------------+
+| UID                         | SOP Class                                     |
++=============================+===============================================+
+| 1.2.840.10008.5.1.4.31      | ModalityWorklistInformationFind               |
++-----------------------------+-----------------------------------------------+
 
+DIMSE Services
+--------------
 
-.. _relpat_statuses:
++-----------------+----------------------------+
+| DIMSE Service   | Usage SCU/SCP              |
++=================+============================+
+| C-FIND          | Mandatory/Mandatory        |
++-----------------+----------------------------+
+
 
 Statuses
 --------
+
+.. _worklist_statuses:
 
 C-FIND Statuses
 ~~~~~~~~~~~~~~~~
@@ -42,9 +44,8 @@ C-FIND Statuses
 | 0xFE00     | Cancel   | Processing has been terminated   |
 +------------+----------+----------------------------------+
 
-
-Relevant Patient Information Query Service Statuses
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Basic Worklist Management Service Statuses
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 +------------------+----------+----------------------------------------------+
 | Code (hex)       | Category | Description                                  |
@@ -53,49 +54,45 @@ Relevant Patient Information Query Service Statuses
 +------------------+----------+----------------------------------------------+
 | 0xA900           | Failure  | Identifier does not match SOP Class          |
 +------------------+----------+----------------------------------------------+
-| 0xC000           | Failure  | Unable to process                            |
-+------------------+----------+----------------------------------------------+
-| 0xC100           | Failure  | More than one match found                    |
-+------------------+----------+----------------------------------------------+
-| 0xC200           | Failure  | Unable to support requested template         |
+| 0xC000 to 0xCFFF | Failure  | Unable to process                            |
 +------------------+----------+----------------------------------------------+
 | 0xFF00           | Pending  | Matches are continuing                       |
 +------------------+----------+----------------------------------------------+
+| 0xFF01           | Pending  | Matches are continuing; one or more Optional |
+|                  |          | keys was not supported                       |
++------------------+----------+----------------------------------------------+
 
-pynetdicom Relevant Patient Information Query Statuses
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+pynetdicom Basic Worklist Management Statuses
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-When pynetdicom is acting as a Relevant Patient Information SCP it uses the
+When pynetdicom is acting as a Basic Worklist Management SCP it uses the
 following status codes values to indicate the corresponding issue has occurred
 to help aid in debugging.
 
 +------------------+----------+-----------------------------------------------+
 | Code (hex)       | Category | Description                                   |
 +==================+==========+===============================================+
-| 0xC001           | Failure  | User's callback implementation returned a     |
+| 0xC001           | Failure  | Handler bound to ``evt.EVT_C_FIND`` yielded a |
 |                  |          | status Dataset with no (0000,0900) *Status*   |
 |                  |          | element                                       |
 +------------------+----------+-----------------------------------------------+
-| 0xC002           | Failure  | User's callback implementation returned an    |
+| 0xC002           | Failure  | Handler bound to ``evt.EVT_C_FIND`` yielded an|
 |                  |          | invalid status object (not a pydicom Dataset  |
 |                  |          | or an int)                                    |
 +------------------+----------+-----------------------------------------------+
 | 0xC310           | Failure  | Failed to decode the dataset received from    |
 |                  |          | the peer                                      |
 +------------------+----------+-----------------------------------------------+
-| 0xC311           | Failure  | Unhandled exception raised by the user's      |
-|                  |          | implementation of the ``on_c_find`` callback  |
+| 0xC311           | Failure  | Unhandled exception raised by the handler     |
+|                  |          | bound to ``evt.EVT_C_FIND``                   |
 +------------------+----------+-----------------------------------------------+
 | 0xC312           | Failure  | Failed to encode the dataset received from    |
-|                  |          | the user's implementation of the ``on_c_find``|
-|                  |          | callback                                      |
+|                  |          | the handler bound to ``evt.EVT_C_FIND``       |
 +------------------+----------+-----------------------------------------------+
-
 
 References
 ----------
 
-* DICOM Standard, Part 4, `Annex Q <http://dicom.nema.org/medical/dicom/current/output/html/part04.html#chapter_Q>`_
-* DICOM Standard, Part 7, Section
-  `9.1.2.1.5 <http://dicom.nema.org/medical/dicom/current/output/chtml/part07/chapter_9.html#sect_9.1.2.1.5>`_
-* DICOM Standard, Part 16, Annex A, `TIDs 9000-9007 <http://dicom.nema.org/medical/dicom/current/output/chtml/part16/sect_RelevantPatientInformationTemplates.html>`_
+* DICOM Standard, Part 4, `Annex K <http://dicom.nema.org/medical/dicom/current/output/html/part04.html#chapter_K>`_
+* DICOM Standard, Part 7, Sections
+  `9.1.2.1.5 <http://dicom.nema.org/medical/dicom/current/output/chtml/part07/chapter_9.html#sect_9.1.2.1.5>`_,

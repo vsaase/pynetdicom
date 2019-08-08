@@ -1,17 +1,19 @@
 """
 Defines the Association class which handles associating with peers.
 """
+import gc
 from io import BytesIO
 import logging
 import threading
 import time
+import warnings
 
 from pydicom.dataset import Dataset
 from pydicom.uid import UID
 
 # pylint: disable=no-name-in-module
 from pynetdicom.acse import ACSE
-from pynetdicom import _config
+from pynetdicom import _config, evt
 from pynetdicom.dimse import DIMSEServiceProvider
 from pynetdicom.dimse_primitives import (
     C_ECHO, C_MOVE, C_STORE, C_GET, C_FIND, C_CANCEL,
@@ -23,46 +25,11 @@ from pynetdicom._globals import (
     MODE_REQUESTOR, MODE_ACCEPTOR, DEFAULT_MAX_LENGTH, STATUS_WARNING,
     STATUS_SUCCESS, STATUS_CANCEL, STATUS_PENDING, STATUS_FAILURE
 )
-from pynetdicom.sop_class import (
-    uid_to_service_class,
-    VerificationSOPClass,
-    ModalityWorklistInformationFind,
-    PatientRootQueryRetrieveInformationModelFind,
-    StudyRootQueryRetrieveInformationModelFind,
-    PatientStudyOnlyQueryRetrieveInformationModelFind,
-    PatientRootQueryRetrieveInformationModelMove,
-    StudyRootQueryRetrieveInformationModelMove,
-    PatientStudyOnlyQueryRetrieveInformationModelMove,
-    PatientRootQueryRetrieveInformationModelGet,
-    StudyRootQueryRetrieveInformationModelGet,
-    PatientStudyOnlyQueryRetrieveInformationModelGet,
-    CompositeInstanceRetrieveWithoutBulkDataGet,
-    GeneralRelevantPatientInformationQuery,
-    BreastImagingRelevantPatientInformationQuery,
-    CardiacRelevantPatientInformationQuery,
-    ProductCharacteristicsQueryInformationModelFind,
-    SubstanceApprovalQueryInformationModelFind,
-    CompositeInstanceRootRetrieveGet,
-    CompositeInstanceRootRetrieveMove,
-    HangingProtocolInformationModelGet,
-    HangingProtocolInformationModelFind,
-    HangingProtocolInformationModelMove,
-    DefinedProcedureProtocolInformationModelGet,
-    DefinedProcedureProtocolInformationModelFind,
-    DefinedProcedureProtocolInformationModelMove,
-    ColorPaletteInformationModelGet,
-    ColorPaletteInformationModelFind,
-    ColorPaletteInformationModelMove,
-    GenericImplantTemplateInformationModelGet,
-    GenericImplantTemplateInformationModelFind,
-    GenericImplantTemplateInformationModelMove,
-    ImplantAssemblyTemplateInformationModelGet,
-    ImplantAssemblyTemplateInformationModelFind,
-    ImplantAssemblyTemplateInformationModelMove,
-    ImplantTemplateGroupInformationModelFind,
-    ImplantTemplateGroupInformationModelGet,
-    ImplantTemplateGroupInformationModelMove,
+from pynetdicom._handlers import (
+    standard_dimse_recv_handler, standard_dimse_sent_handler,
+    standard_pdu_recv_handler, standard_pdu_sent_handler,
 )
+from pynetdicom.sop_class import uid_to_service_class, VerificationSOPClass
 from pynetdicom.pdu_primitives import (
     UserIdentityNegotiation,
     MaximumLengthNotification,
@@ -96,13 +63,13 @@ class Association(threading.Thread):
     dul : dul.DULServiceProvider
         The DICOM Upper Layer service provider.
     is_aborted : bool
-        True if the association has been aborted, False otherwise.
+        ``True`` if the association has been aborted, ``False`` otherwise.
     is_established : bool
-        True if the association has been established, False otherwise.
+        ``True`` if the association has been established, ``False`` otherwise.
     is_rejected : bool
-        True if the association was rejected, False otherwise.
+        ``True`` if the association was rejected, ``False`` otherwise.
     is_released : bool
-        True if the association has been released, False otherwise.
+        ``True`` if the association has been released, ``False`` otherwise.
     mode : str
         The mode of the local AE, either the association 'requestor' or
         association 'acceptor'.
@@ -110,21 +77,25 @@ class Association(threading.Thread):
         Representation of the association's requestor AE.
     """
     def __init__(self, ae, mode):
-        """Create a new Association instance.
+        """Create a new ``Association`` instance.
 
-        The Association starts in State 1 (idle). Association negotiation
-        won't begin until an AssociationSocket is assigned using set_socket()
-        and Association.start() is called.
+        The association starts in State 1 (idle). Association negotiation
+        won't begin until an ``AssociationSocket`` is assigned using
+        ``set_socket()`` and ``Association.start_server()`` is called.
 
         Parameters
         ----------
         ae : ae.ApplicationEntity
             The local AE.
         mode : str
-            Must be "requestor" or "acceptor".
+            Must be ``"requestor"`` or ``"acceptor"``.
         """
         self._ae = ae
         self.mode = mode
+
+        # If acceptor this is the parent AssociationServer, used to identify
+        #   the thread when updating bound event-handlers
+        self._server = None
 
         # Represents the association requestor and acceptor users
         self.requestor = ServiceUser(self, MODE_REQUESTOR)
@@ -137,18 +108,22 @@ class Association(threading.Thread):
         self.is_released = False
 
         # Accepted and rejected presentation contexts
-        self._accepted_cx = []
+        self._accepted_cx = {}
         self._rejected_cx = []
 
         # Service providers
-        self.acse = ACSE()
+        self.acse = ACSE(self)
         self.dul = DULServiceProvider(self)
-        self.dimse = DIMSEServiceProvider(self.dul, self.ae.dimse_timeout)
+        self.dimse = DIMSEServiceProvider(self)
 
         # Timeouts (in seconds), needs to be set after DUL init
         self.acse_timeout = self.ae.acse_timeout
         self.dimse_timeout = self.ae.dimse_timeout
         self.network_timeout = self.ae.network_timeout
+
+        # Event handlers
+        self._handlers = {}
+        self._bind_defaults()
 
         # Kills the thread loop in run()
         self._kill = False
@@ -156,25 +131,23 @@ class Association(threading.Thread):
         self._started_dul = False
         # Used to pause the association reactor until the DUL is ready
         self._dul_ready = threading.Event()
-
-        # Send A-ABORT/A-P-ABORT when an A-ASSOCIATE request is received
-        self._a_abort_assoc_rq = False
-        self._a_p_abort_assoc_rq = False
-
-        # Point the public send_c_cancel_* functions to the actual function
-        # TODO: Deprecated, to be removed in v1.3
-        self.send_c_cancel_find = self.send_c_cancel
-        self.send_c_cancel_move = self.send_c_cancel
-        self.send_c_cancel_get = self.send_c_cancel
+        # Used to pause the association reactor while a service is being used
+        self._reactor_checkpoint = threading.Event()
+        self._reactor_checkpoint.set()
 
         # Thread setup
         threading.Thread.__init__(self)
         self.daemon = True
 
     def abort(self):
-        """Sends an A-ABORT to the remote AE and kills the Association."""
+        """Send an A-ABORT to the remote AE and kill the ``Association``."""
         if not self.is_released:
-            self.acse.send_abort(self, 0x00)
+            # Ensure the reactor is running so it can be exited
+            self._reactor_checkpoint.set()
+            LOGGER.info('Aborting Association')
+            self.acse.send_abort(0x00)
+            # Event handler - association aborted
+            evt.trigger(self, evt.EVT_ABORTED, {})
             self.kill()
 
         # Add short delay to ensure everything shuts down
@@ -182,7 +155,7 @@ class Association(threading.Thread):
 
     @property
     def accepted_contexts(self):
-        """Return a list of accepted Presentation Contexts."""
+        """Return a list of accepted ``PresentationContexts``."""
         # Accepted contexts are stored internally as {context ID : context}
         return sorted(self._accepted_cx.values(), key=lambda x: x.context_id)
 
@@ -193,17 +166,59 @@ class Association(threading.Thread):
 
     @acse_timeout.setter
     def acse_timeout(self, value):
-        """Set the ACSE timeout using numeric or None."""
-        self.dul.artim_timer.timeout = value
-        self._acse_timeout = value
+        """Set the ACSE timeout using numeric or ``None``."""
+        with threading.Lock():
+            self.dul.artim_timer.timeout = value
+            self._acse_timeout = value
 
     @property
     def ae(self):
-        """Return the Association's parent ApplicationEntity."""
+        """Return the Association's parent ``ApplicationEntity``."""
         return self._ae
 
+    def bind(self, event, handler):
+        """Bind a callable `handler` to an `event`.
+
+        Parameters
+        ----------
+        event : namedtuple
+            The event to bind the function to.
+        handler : callable
+            The function that will be called if the event occurs.
+        """
+        # Make sure no access to `_handlers` while its being changed
+        with threading.Lock():
+            # Notification events - multiple handlers allowed
+            if event.is_notification:
+                if event not in self._handlers:
+                    self._handlers[event] = []
+                if handler not in self._handlers[event]:
+                    self._handlers[event].append(handler)
+
+            # Intervention events - only one handler allowed
+            if event.is_intervention:
+                if event not in self._handlers:
+                    self._handlers[event] = None
+
+                if self._handlers[event] != handler:
+                    self._handlers[event] = handler
+
+    def _bind_defaults(self):
+        """Bind the default event handlers."""
+        # Intervention event handlers
+        for event in evt._INTERVENTION_EVENTS:
+            handler = evt.get_default_handler(event)
+            self.bind(event, handler)
+
+        # Notification event handlers
+        if _config.LOG_HANDLER_LEVEL == 'standard':
+            self.bind(evt.EVT_DIMSE_RECV, standard_dimse_recv_handler)
+            self.bind(evt.EVT_DIMSE_SENT, standard_dimse_sent_handler)
+            self.bind(evt.EVT_PDU_RECV, standard_pdu_recv_handler)
+            self.bind(evt.EVT_PDU_SENT, standard_pdu_sent_handler)
+
     def _check_received_status(self, rsp):
-        """Return a pydicom Dataset containing status related elements.
+        """Return a pydicom ``Dataset`` containing status related elements.
 
         Parameters
         ----------
@@ -215,10 +230,10 @@ class Association(threading.Thread):
         -------
         pydicom.dataset.Dataset
             If no response or an invalid response was received from the peer
-            then an empty Dataset, if a valid response was received from the
-            peer then (at a minimum) a Dataset containing an (0000,0900)
-            *Status* element, and any included optional status related
-            elements.
+            then an empty ``Dataset``, if a valid response was received from
+            the peer then (at a minimum) a ``Dataset`` containing an
+            (0000,0900) *Status* element, and any included optional status
+            related elements.
         """
         msg_type = rsp.__class__.__name__
         msg_type = msg_type.replace('_', '-')
@@ -245,12 +260,37 @@ class Association(threading.Thread):
 
     @dimse_timeout.setter
     def dimse_timeout(self, value):
-        """Set the DIMSE timeout using numeric or None."""
-        self.dimse.dimse_timeout = value
-        self._dimse_timeout = value
+        """Set the DIMSE timeout using numeric or ``None``."""
+        with threading.Lock():
+            self._dimse_timeout = value
+
+    def get_events(self):
+        """Return a list of currently bound events."""
+        return sorted(self._handlers.keys(), key=lambda x: x.name)
+
+    def get_handlers(self, event):
+        """Return handlers bound to a specific `event`.
+
+        Parameters
+        ----------
+        event : namedtuple
+            The event bound to the handlers.
+
+        Returns
+        -------
+        callable, list of callable or None
+            If the event is a notification event then returns a list of
+            callable functions bound to `event`, if the event is an
+            intervention event then returns either a callable function if a
+            handler is bound to the event or None if no handler has been bound.
+        """
+        if event not in self._handlers:
+            return []
+
+        return self._handlers[event]
 
     def _get_valid_context(self, ab_syntax, tr_syntax, role, context_id=None):
-        """Return a valid Presentation Context matching the parameters.
+        """Return a valid presentation context matching the parameters.
 
         Parameters
         ----------
@@ -261,8 +301,9 @@ class Association(threading.Thread):
             the transfer syntax will not be used for matching. If the value
             corresponds to an uncompressed syntax then matches will be made
             with any uncompressed transfer syntaxes.
-        role : str
-            One of 'scu' or 'scp', the required role of the context.
+        role : str or None
+            One of 'scu' or 'scp', the required role of the context. If None
+            then the accepted role will be ignored.
         context_id : int or None
             If not None then the ID of the presentation context to use. It will
             be checked against the available parameter values.
@@ -305,6 +346,7 @@ class Association(threading.Thread):
             # Only a valid presentation context can reach this point
             return cx
 
+        role = role or 'scu'
         msg = (
             "No suitable presentation context for the {} role has been "
             "accepted by the peer for the SOP Class '{}'"
@@ -318,16 +360,18 @@ class Association(threading.Thread):
 
     @property
     def is_acceptor(self):
-        """Return True if the local AE is the association acceptor."""
+        """Return ``True`` if the local AE is the association *Acceptor*."""
         return self.mode == MODE_ACCEPTOR
 
     @property
     def is_requestor(self):
-        """Return True if the local AE is the association requestor."""
+        """Return ``True`` if the local AE is the association *Requestor*."""
         return self.mode == MODE_REQUESTOR
 
     def kill(self):
-        """Kill the main association thread loop."""
+        """Kill the ``Association`` thread."""
+        # Ensure the reactor is running so it can be exited
+        self._reactor_checkpoint.set()
         self._kill = True
         self.is_established = False
         while self.dul.is_alive() and not self.dul.stop_dul():
@@ -342,6 +386,11 @@ class Association(threading.Thread):
         return self.requestor.info
 
     @property
+    def lock(self):
+        """Return the AE's threading.Lock() instance."""
+        return self.ae._lock
+
+    @property
     def mode(self):
         """Return the Association's `mode` as a str."""
         return self._mode
@@ -353,11 +402,11 @@ class Association(threading.Thread):
         Parameters
         ----------
         mode : str
-            The mode of the Association, must be either "requestor" or
-            "acceptor". If "requestor" then its assumed that the local AE
-            requests an association with peers and (by default) acts as the
-            SCU. If "acceptor" then its assumed that the local AE is listening
-            for association requests and (by default) acts as the SCP.
+            The mode of the Association, must be either ``"requestor"`` or
+            ``"acceptor"``. If ``"requestor"`` then its assumed that the local
+            AE requests an association with peers and (by default) acts as the
+            SCU. If ``"acceptor"`` then its assumed that the local AE is
+            listening for association requests and (by default) acts as the SCP.
         """
         mode = mode.lower()
         if mode not in [MODE_REQUESTOR, MODE_ACCEPTOR]:
@@ -376,19 +425,26 @@ class Association(threading.Thread):
 
     @network_timeout.setter
     def network_timeout(self, value):
-        """Set the network timeout using numeric or None."""
-        self.dul._idle_timer.timeout = value
-        self._network_timeout = value
+        """Set the network timeout using numeric or ``None``."""
+        with threading.Lock():
+            self.dul._idle_timer.timeout = value
+            self._network_timeout = value
 
     @property
     def rejected_contexts(self):
-        """Return a list of rejected Presentation Contexts."""
+        """Return a list of rejected ``PresentationContext``."""
         return self._rejected_cx
 
     def release(self):
         """Send an A-RELEASE request and initiate association release."""
         if self.is_established:
-            self.acse.negotiate_release(self)
+            # Ensure the reactor is paused so it doesn't
+            #   steal incoming ACSE messages
+            self._reactor_checkpoint.clear()
+            LOGGER.info('Releasing Association')
+            self.acse.negotiate_release()
+            # Restart reactor
+            self._reactor_checkpoint.set()
 
     @property
     def remote(self):
@@ -401,8 +457,9 @@ class Association(threading.Thread):
     def request(self):
         """Request an association with a peer.
 
-        A request can only be made once the Association instance has been
-        configured for requestor mode and been assigned an AssociationSocket.
+        A request can only be made once the ``Association`` instance has been
+        configured for requestor mode and been assigned an
+        ``AssociationSocket``.
         """
         # Start the DUL thread if not already started
         self.dul.start()
@@ -410,17 +467,17 @@ class Association(threading.Thread):
         # Wait until the DUL is up and running
         self._dul_ready.wait()
         # Start association negotiation
-        self.acse.negotiate_association(self)
+        LOGGER.info("Requesting Association")
+        self.acse.negotiate_association()
 
     def run(self):
-        """The main Association control."""
+        """The main ``Association`` reactor."""
         # Start the DUL thread if not already started
         if not self._started_dul:
             self.dul.start()
             self._started_dul = True
             # Wait until the DUL is up and running
             self._dul_ready.wait()
-            #time.sleep(0.05)
 
         if self.is_acceptor:
             primitive = self.dul.receive_pdu(wait=True,
@@ -432,34 +489,27 @@ class Association(threading.Thread):
                 return
 
             self.requestor.primitive = primitive
+            evt.trigger(self, evt.EVT_REQUESTED, {})
 
-            # (Optionally) send an A-ABORT/A-P-ABORT in response
-            if self._a_abort_assoc_rq:
-                self.acse.send_abort(self, 0x00)
-                self.kill()
-                return
-            elif self._a_p_abort_assoc_rq:
-                self.acse.send_ap_abort(self, 0x00)
-                self.kill()
-                return
-
-            self.acse.negotiate_association(self)
+            self.acse.negotiate_association()
             if self.is_established:
-                self.dimse.maximum_pdu_size = self.requestor.maximum_length
-                self._run_as_acceptor()
+                self._run_reactor()
+
+            # Ensure the connection is shutdown properly
+            if self.dul.socket.socket:
+                self._server.shutdown_request(self.dul.socket.socket)
         else:
             # Association requestor
             # Allow non-blocking negotiation
             if (not self.is_established and not self.is_aborted
                     and not self.is_released and not self.is_rejected):
-                self.acse.negotiate_association(self)
+                self.acse.negotiate_association()
 
             if self.is_established:
-                self.dimse.maximum_pdu_size = self.acceptor.maximum_length
-                self._run_as_requestor()
+                self._run_reactor()
 
-    def _run_as_acceptor(self):
-        """Run the Association acceptor reactor loop.
+    def _run_reactor(self):
+        """Run the ``Association`` acceptor reactor loop.
 
         Main acceptor run loop
         1. Checks for incoming DIMSE messages
@@ -474,139 +524,44 @@ class Association(threading.Thread):
         5. Checks DUL idle timeout
             If timed out then kill thread
         """
-        info = {
-            'requestor' : self.requestor.info,
-            'acceptor' : self.acceptor.info,
-            'sop_class_extended' : self.acceptor.sop_class_extended,
-            'sop_class_common_extended' : (
-                self.acceptor.accepted_common_extended
-            ),
-        }
-
         while not self._kill:
+            # A race condition may occur if the Acceptor uses the send_*()
+            #   methods as the received DIMSE message may be taken off the
+            #   queue before the send_*() method gets to it, so we allow
+            #   the reactor to be paused
+            # Will block until `_reactor_checkpoint` is True
+            self._reactor_checkpoint.wait()
+
             time.sleep(0.001)
 
             # Check with the DIMSE provider to see if a completely decoded
             #   message is available
-            msg_context_id, msg = self.dimse.get_msg(block=False)
-
-            # DIMSE message received, should be a service request
+            context_id, msg = self.dimse.get_msg(block=False)
             if msg:
-                # Use the Message's Affected SOP Class UID or Requested SOP
-                #   Class UID to determine which service to use
-                # If there's no AffectedSOPClassUID or RequestedSOPClassUID
-                #   then we received a C-CANCEL request
-                if getattr(msg, 'AffectedSOPClassUID', None) is not None:
-                    # DIMSE-C, N-EVENT-REPORT, N-CREATE use AffectedSOPClassUID
-                    class_uid = msg.AffectedSOPClassUID
-                elif getattr(msg, 'RequestedSOPClassUID', None) is not None:
-                    # N-GET, N-SET, N-ACTION, N-DELETE use RequestedSOPClassUID
-                    class_uid = msg.RequestedSOPClassUID
-
-                # SOP Class Common Extended Negotiation
-                try:
-                    # The service class UID
-                    class_uid = (
-                        self.acceptor.accepted_common_extended[class_uid][0]
-                    )
-                except KeyError:
-                    pass
-
-                # Convert the SOP/Service UID to the corresponding service
-                service_class = uid_to_service_class(class_uid)(self)
-
-                try:
-                    context = self._accepted_cx[msg_context_id]
-                except KeyError:
-                    LOGGER.info(
-                        "Received DIMSE message with invalid or rejected "
-                        "context ID: %d", msg_context_id
-                    )
-                    LOGGER.debug("%s", msg)
-                    self.abort()
-                    return
-
-                # Run corresponding Service Class in SCP mode
-                try:
-                    # Clear out any C-CANCEL requests received beforehand
-                    self.dimse.cancel_req = {}
-                    service_class.SCP(msg, context, info)
-                    # Clear out any unacted upon requests received during
-                    self.dimse.cancel_req = {}
-                except NotImplementedError:
-                    # SCP isn't implemented
-                    LOGGER.warning(
-                        "No service class implementation for '{}'"
-                        .format(context.abstract_syntax)
-                    )
-                    self.abort()
-                    return
+                self._serve_request(msg, context_id)
 
             # Check for release request
-            if self.acse.is_release_requested(self):
+            if self.acse.is_release_requested():
                 # Send A-RELEASE response
-                self.acse.send_release(self, is_response=True)
+                self.acse.send_release(is_response=True)
+                LOGGER.info('Association Released')
                 self.is_released = True
                 self.is_established = False
-                # Callback triggers
-                self.ae.on_association_released()
-                self.debug_association_released()
+                evt.trigger(self, evt.EVT_RELEASED, {})
                 self.kill()
                 return
 
             # Check for abort
-            if self.acse.is_aborted(self):
+            if self.acse.is_aborted():
+                LOGGER.info('Association Aborted')
                 self.is_aborted = True
                 self.is_established = False
-                # Callback trigger
-                self.debug_association_aborted()
-                self.ae.on_association_aborted(None)
+                evt.trigger(self, evt.EVT_ABORTED, {})
                 self.kill()
                 return
 
             # Check if the DULServiceProvider thread is still running
             #   DUL.is_alive() is inherited from threading.thread
-            if not self.dul.is_alive():
-                self.kill()
-                return
-
-            # Check if idle timer has expired
-            if self.dul.idle_timer_expired():
-                self.abort()
-                self.kill()
-                return
-
-    def _run_as_requestor(self):
-        """Run the association as the requestor."""
-        # Listen for further messages from the peer
-        while not self._kill:
-            time.sleep(0.1)
-
-            # Check for release request
-            if self.acse.is_release_requested(self):
-                # Send A-RELEASE response
-                self.acse.send_release(self, is_response=True)
-                self.is_released = True
-                self.is_established = False
-                # Callback triggers
-                self.ae.on_association_released()
-                self.debug_association_released()
-                self.kill()
-                return
-
-            # Check for abort
-            if self.acse.is_aborted(self):
-                self.is_aborted = True
-                self.is_established = False
-                # Callback trigger
-                self.ae.on_association_aborted()
-                self.debug_association_aborted()
-                self.kill()
-                return
-
-            # Check if the DULServiceProvider thread is
-            #   still running. DUL.is_alive() is inherited from
-            #   threading.thread
             if not self.dul.is_alive():
                 self.kill()
                 return
@@ -634,6 +589,32 @@ class Association(threading.Thread):
             raise RuntimeError("The Association already has a socket set.")
 
         self.dul.socket = socket
+
+    def unbind(self, event, handler):
+        """Unbind a callable `func` from an `event`.
+
+        Parameters
+        ----------
+        event : namedtuple
+            The event to unbind the function from.
+        handler : callable
+            The function that will no longer be called if the event occurs.
+        """
+        if event not in self._handlers:
+            return
+
+        # Make sure no access to `_handlers` while its being changed
+        with threading.Lock():
+            # Notification events
+            if event.is_notification and handler in self._handlers[event]:
+                self._handlers[event].remove(handler)
+
+                if not self._handlers[event]:
+                    del self._handlers[event]
+
+            # Intervention events - unbind and replace with default
+            if event.is_intervention and self._handlers[event] == handler:
+                self._handlers[event] = evt.get_default_handler(event)
 
     # DIMSE-C services provided by the Association
     def _c_store_scp(self, req):
@@ -686,41 +667,17 @@ class Association(threading.Thread):
             self.dimse.send_msg(rsp, 1)
             return
 
-        # Attempt to decode the dataset
-        # pylint: disable=broad-except
-        transfer_syntax = context.transfer_syntax[0]
-        if _config.DECODE_STORE_DATASETS:
-            try:
-                ds = decode(req.DataSet,
-                            transfer_syntax.is_implicit_VR,
-                            transfer_syntax.is_little_endian)
-            except Exception as ex:
-                LOGGER.error('Failed to decode the received dataset')
-                LOGGER.exception(ex)
-                rsp.Status = 0xC210
-                rsp.ErrorComment = 'Unable to decode the dataset'
-                self.dimse.send_msg(rsp, context.context_id)
-                return
-        else:
-            ds = req.DataSet.getvalue()
-
-        info = {
-            'acceptor' : self.acceptor.info,
-            'requestor': self.requestor.info,
-            'parameters' : {
-                'message_id' : req.MessageID,
-                'priority' : req.Priority,
-                'originator_aet' : req.MoveOriginatorApplicationEntityTitle,
-                'original_message_id' : req.MoveOriginatorMessageID
-            }
-        }
-
-        #  Attempt to run the ApplicationEntity's on_c_store callback
+        # Attempt to handle the service request
         try:
-            status = self.ae.on_c_store(ds, context.as_tuple, info)
+            status = evt.trigger(
+                self,
+                evt.EVT_C_STORE,
+                {'request' : req, 'context' : context.as_tuple}
+            )
         except Exception as ex:
-            LOGGER.error("Exception in the "
-                         "ApplicationEntity.on_c_store() callback")
+            LOGGER.error(
+                "Exception in the handler bound to 'evt.EVT_C_STORE'"
+            )
             LOGGER.exception(ex)
             rsp.Status = 0xC211
             self.dimse.send_msg(rsp, context.context_id)
@@ -762,16 +719,18 @@ class Association(threading.Thread):
         Parameters
         ----------
         msg_id : int
-            The message ID of the C-GET/MOVE/FIND operation we want to cancel.
-            Must be between 0 and 65535, inclusive.
+            The *Message ID* of the C-GET/C-MOVE/C-FIND operation to be
+            cancelled. Must be between 0 and 65535, inclusive.
         context_id : int
-            The presentation context ID of the original C-GET/MOVE/FIND
+            The presentation context ID of the original C-GET/C-MOVE/C-FIND
             service request.
         """
         # Can't send a C-CANCEL without an Association
         if not self.is_established:
-            raise RuntimeError("The association with a peer SCP must be "
-                               "established before sending a C-CANCEL request.")
+            raise RuntimeError(
+                "The association with a peer SCP must be "
+                "established before sending a C-CANCEL request."
+            )
 
         # Build C-CANCEL primitive
         primitive = C_CANCEL()
@@ -798,7 +757,7 @@ class Association(threading.Thread):
             returns an empty ``Dataset``. If a valid response was received from
             the peer then returns a ``Dataset`` containing at least a
             (0000,0900) *Status* element, and, depending on the returned
-            Status value, may optionally contain additional elements (see
+            *Status* value, may optionally contain additional elements (see
             DICOM Standard Part 7, Annex C).
 
             The DICOM Standard Part 7, Table 9.3-13 indicates that the Status
@@ -807,13 +766,13 @@ class Association(threading.Thread):
             values:
 
             Success
-              | ``0x0000`` Success
+              | ``0x0000`` - Success
 
             Failure
-              | ``0x0122`` SOP class not supported
-              | ``0x0210`` Duplicate invocation
-              | ``0x0211`` Unrecognised operation
-              | ``0x0212`` Mistyped argument
+              | ``0x0122`` - SOP class not supported
+              | ``0x0210`` - Duplicate invocation
+              | ``0x0211`` - Unrecognised operation
+              | ``0x0212`` - Mistyped argument
 
             As the actual status depends on the peer SCP, it shouldn't be
             assumed that it will be one of these.
@@ -828,7 +787,6 @@ class Association(threading.Thread):
 
         See Also
         --------
-        ae.ApplicationEntity.on_c_echo
         dimse_primitives.C_ECHO
         service_class.VerificationServiceClass
 
@@ -838,8 +796,8 @@ class Association(threading.Thread):
         * DICOM Standard Part 4, `Annex A <http://dicom.nema.org/medical/dicom/current/output/html/part04.html#chapter_A>`_
         * DICOM Standard Part 7, Sections
           `9.1.5 <http://dicom.nema.org/medical/dicom/current/output/html/part07.html#sect_9.1.5>`_,
-           and `9.3.5 <http://dicom.nema.org/medical/dicom/current/output/html/part07.html#sect_9.3.5>`_
-          `Annex C <http://dicom.nema.org/medical/dicom/current/output/html/part07.html#chapter_C>`_
+          `9.3.5 <http://dicom.nema.org/medical/dicom/current/output/html/part07.html#sect_9.3.5>`_,
+          and `Annex C <http://dicom.nema.org/medical/dicom/current/output/html/part07.html#chapter_C>`_
         """
         # Can't send a C-ECHO without an Association
         if not self.is_established:
@@ -857,8 +815,16 @@ class Association(threading.Thread):
         primitive.AffectedSOPClassUID = VerificationSOPClass
 
         # Send C-ECHO request to the peer via DIMSE and wait for the response
+        LOGGER.info('Sending Echo Request: MsgID {}'.format(msg_id))
+
+        # Pause the reactor to prevent a race condition
+        self._reactor_checkpoint.clear()
+
         self.dimse.send_msg(primitive, context.context_id)
         cx_id, rsp = self.dimse.get_msg(block=True)
+
+        # Unpause the reactor
+        self._reactor_checkpoint.set()
 
         # If `rsp` is None then the DIMSE timeout expired so abort
         if rsp is None:
@@ -872,7 +838,7 @@ class Association(threading.Thread):
 
         return status
 
-    def send_c_find(self, dataset, msg_id=1, priority=2, query_model='P'):
+    def send_c_find(self, dataset, query_model, msg_id=1, priority=2):
         """Send a C-FIND request to the peer AE.
 
         Yields ``(status, identifier)`` pairs.
@@ -883,6 +849,10 @@ class Association(threading.Thread):
             The C-FIND request's *Identifier* dataset. The exact requirements
             for the *Identifier* dataset are Service Class specific (see the
             DICOM Standard, Part 4).
+        query_model : pydicom.uid.UID or str
+            The value to use for the C-FIND request's (0000,0002) *Affected
+            SOP Class UID* parameter, which usually corresponds to the
+            Information Model that is to be used.
         msg_id : int, optional
             The DIMSE *Message ID*, must be between 0 and 65535, inclusive,
             (default 1).
@@ -893,40 +863,6 @@ class Association(threading.Thread):
             - ``0`` - Medium
             - ``1`` - High
             - ``2`` - Low (default)
-
-        query_model : str, optional
-            The Information Model to use, one of the following:
-
-            - ``P`` - *Patient Root Information Model - FIND*
-              1.2.840.10008.5.1.4.1.2.1.1 (default)
-            - ``S`` - *Study Root Information Model - FIND*
-              1.2.840.10008.5.1.4.1.2.2.1
-            - ``O`` - *Patient Study Only Information Model - FIND*
-              1.2.840.10008.5.1.4.1.2.3.1
-            - ``W`` - *Modality Worklist Information - FIND*
-              1.2.840.10008.5.1.4.31
-            - ``G`` - *General Relevant Patient Information Query*
-              1.2.840.10008.5.1.4.37.1
-            - ``B`` - *Breast Imaging Relevant Patient Information Query*
-              1.2.840.10008.5.1.4.37.2
-            - ``C`` - *Cardiac Relevant Patient Information Query*
-              1.2.840.10008.5.1.4.37.3
-            - ``PC`` - *Product Characteristics Query Information Model - FIND*
-              1.2.840.10008.5.1.4.41
-            - ``SA`` - *Substance Approval Query Information Model - FIND*
-              1.2.840.10008.5.1.4.42
-            - ``H`` - *Hanging Protocol Information Model - FIND*
-              1.2.840.10008.5.1.4.38.2
-            - ``D`` - *Defined Procedure Protocol Information Model - FIND*
-              1.2.840.10008.5.1.4.20.1
-            - ``CP`` - *Color Palette Information Model - FIND*
-              1.2.840.10008.5.1.4.39.2
-            - ``IG`` - *Generic Implant Template Information Model - FIND*
-              1.2.840.10008.5.1.4.43.2
-            - ``IA`` - *Implant Assembly Template Information Model - FIND*
-              1.2.840.10008.5.1.4.44.2
-            - ``IT`` - *Implant Template Group Information Model - FIND*
-              1.2.840.10008.5.1.4.44.2
 
         Yields
         ------
@@ -939,62 +875,64 @@ class Association(threading.Thread):
             Part 7, Section 9.1.2.1.5 and Annex C).
 
             The status for the requested C-FIND operation should be one of the
-            following values, but as the returned value depends
+            following values, but as the value depends
             on the peer this can't be assumed:
 
-            General C-FIND (Part 7, Section 9.1.2.1.5 and Annex C)
+            *General C-FIND* (Part 7, Section 9.1.2.1.5 and Annex C)
 
             Cancel
-              | ``0xFE00`` Matching terminated due to Cancel request
+              | ``0xFE00`` - Matching terminated due to Cancel request
 
             Success
-              | ``0x0000`` Matching is complete: no final Identifier is
+              | ``0x0000`` - Matching is complete: no final Identifier is
                 supplied
 
             Failure
-              | ``0x0122`` SOP class not supported
+              | ``0x0122`` - SOP class not supported
 
-            Query/Retrieve Service, Basic Worklist Management Service,
+            *Query/Retrieve Service, Basic Worklist Management Service,
             Hanging Protocol Query/Retrieve Service, Defined Procedure Protocol
             Query/Retrieve Service, Substance Administration Query Service,
-            Color Palette Query/Retrieve Service and Implant Template
-            Query/Retrieve Service specific
+            Color Palette Query/Retrieve Service*, *Implant Template
+            Query/Retrieve Service*, *Protocol Approval Query/Retrieve
+            Service* and *Unified Protocol Step Service* specific
             (DICOM Standard Part 4, Annexes C.4.1, K.4.1.1.4, U.4.1, HH,
-            V.4.1.1.4, X and BB):
+            V.4.1.1.4, X, BB, II and CC):
 
             Failure
-              | ``0xA700`` Out of resources
-              | ``0xA900`` Identifier does not match SOP Class
-              | ``0xC000`` to ``0xCFFF`` Unable to process
+              | ``0xA700`` - Out of resources
+              | ``0xA900`` - Identifier does not match SOP Class
+              | ``0xC000`` to ``0xCFFF`` - Unable to process
 
             Pending
-              | ``0xFF00`` Matches are continuing: current match is supplied
+              | ``0xFF00`` - Matches are continuing: current match is supplied
                 and any Optional Keys were supported in the same manner as
                 Required Keys
-              | ``0xFF01`` Matches are continuing: warning that one or more
+              | ``0xFF01`` - Matches are continuing: warning that one or more
                 Optional Keys were not supported for existence and/or matching
                 for this Identifier)
 
-            Relevant Patient Information Query Service specific (DICOM
+            *Relevant Patient Information Query Service* specific (DICOM
             Standard Part 4, Annex Q.2.1.1.4):
 
             Failure
-              | ``0xA700`` Out of resources
-              | ``0xA900`` Identifier does not match SOP Class
-              | ``0xC000`` Unable to process
-              | ``0xC100`` More than one match found
-              | ``0xC200`` Unable to support requested template
+              | ``0xA700`` - Out of resources
+              | ``0xA900`` - Identifier does not match SOP Class
+              | ``0xC000`` - Unable to process
+              | ``0xC100`` - More than one match found
+              | ``0xC200`` - Unable to support requested template
 
             Pending
-              | ``0xFF00`` Matches are continuing: current match is supplied
+              | ``0xFF00`` - Matches are continuing: current match is supplied
                 and any Optional Keys were supported in the same manner as
                 Required Keys
 
         identifier : pydicom.dataset.Dataset or None
-            If the status is 'Pending' then the C-FIND response's *Identifier*
-            ``Dataset``. If the status is not 'Pending' this will be ``None``.
-            The exact contents of the response *Identifier* are Service Class
-            specific (see the DICOM Standard, Part 4).
+            If the status category is 'Pending' then the C-FIND response's
+            *Identifier* ``Dataset``. If the status category is not 'Pending'
+            this will be ``None``. The exact contents of the response
+            *Identifier* are Service Class specific (see the DICOM Standard,
+            Part 4).
 
         Raises
         ------
@@ -1006,15 +944,16 @@ class Association(threading.Thread):
 
         See Also
         --------
-        ae.ApplicationEntity.on_c_find
         dimse_primitives.C_FIND
+        service_class.ColorPaletteQueryRetrieveServiceClass
+        service_class.DefinedProcedureProtocolQueryRetrieveServiceClass
+        service_class.HangingProtocolQueryRetrieveServiceClass
+        service_class.ImplantTemplateQueryRetrieveServiceClass
+        service_class.ProtocolApprovalQueryRetrieveServiceClass
         service_class.QueryRetrieveFindServiceClass
         service_class.RelevantPatientInformationQueryServiceClass
         service_class.SubstanceAdministrationQueryServiceClass
-        service_class.HangingProtocolQueryRetrieveServiceClass
-        service_class.DefinedProcedureProtocolQueryRetrieveServiceClass
-        service_class.ColorPaletteQueryRetrieveServiceClass
-        service_class.ImplantTemplateQueryRetrieveServiceClass
+        service_class.UnifiedProcedureStepServiceClass
 
         References
         ----------
@@ -1026,45 +965,21 @@ class Association(threading.Thread):
         * DICOM Standard Part 4, `Annex X <http://dicom.nema.org/medical/dicom/current/output/html/part04.html#chapter_X>`_
         * DICOM Standard Part 4, `Annex BB <http://dicom.nema.org/medical/dicom/current/output/html/part04.html#chapter_BB>`_
         * DICOM Standard Part 4, `Annex HH <http://dicom.nema.org/medical/dicom/current/output/html/part04.html#chapter_HH>`_
+        * DICOM Standard Part 4, `Annex II <http://dicom.nema.org/medical/dicom/current/output/html/part04.html#chapter_II>`_
         * DICOM Standard Part 7, Sections
           `9.1.2 <http://dicom.nema.org/medical/dicom/current/output/html/part07.html#sect_9.1.2>`_,
           `9.3.2 <http://dicom.nema.org/medical/dicom/current/output/html/part07.html#sect_9.3.2>`_,
           Annexes `C <http://dicom.nema.org/medical/dicom/current/output/html/part07.html#chapter_C>`_
-           and `K <http://dicom.nema.org/medical/dicom/current/output/html/part07.html#chapter_K>`_
+          and `K <http://dicom.nema.org/medical/dicom/current/output/html/part07.html#chapter_K>`_
         """
         # Can't send a C-FIND without an Association
         if not self.is_established:
             raise RuntimeError("The association with a peer SCP must be "
                                "established before sending a C-FIND request")
 
-        _sop_classes = {
-            'W' : ModalityWorklistInformationFind,
-            "P" : PatientRootQueryRetrieveInformationModelFind,
-            "S" : StudyRootQueryRetrieveInformationModelFind,
-            "O" : PatientStudyOnlyQueryRetrieveInformationModelFind,
-            "G" : GeneralRelevantPatientInformationQuery,
-            "B" : BreastImagingRelevantPatientInformationQuery,
-            "C" : CardiacRelevantPatientInformationQuery,
-            "PC" : ProductCharacteristicsQueryInformationModelFind,
-            "SA" : SubstanceApprovalQueryInformationModelFind,
-            "H" : HangingProtocolInformationModelFind,
-            "D" : DefinedProcedureProtocolInformationModelFind,
-            "CP" : ColorPaletteInformationModelFind,
-            "IG" : GenericImplantTemplateInformationModelFind,
-            "IA" : ImplantAssemblyTemplateInformationModelFind,
-            "IT" : ImplantTemplateGroupInformationModelFind,
-        }
-
-        try:
-            sop_class = _sop_classes[query_model]
-        except KeyError:
-            raise ValueError(
-                "Unsupported value for `query_model`: {}".format(query_model)
-            )
-
         # Determine the Presentation Context we are operating under
         #   and hence the transfer syntax to use for encoding `dataset`
-        context = self._get_valid_context(sop_class, '', 'scu')
+        context = self._get_valid_context(query_model, '', 'scu')
 
         # Build C-FIND request primitive
         #   (M) Message ID
@@ -1073,7 +988,7 @@ class Association(threading.Thread):
         #   (M) Identifier
         req = C_FIND()
         req.MessageID = msg_id
-        req.AffectedSOPClassUID = sop_class
+        req.AffectedSOPClassUID = query_model
         req.Priority = priority
 
         # Encode the Identifier `dataset` using the agreed transfer syntax
@@ -1089,12 +1004,15 @@ class Association(threading.Thread):
             LOGGER.error("Failed to encode the supplied Dataset")
             raise ValueError('Failed to encode the supplied Dataset')
 
-        LOGGER.info('Find SCU Request Identifiers:')
+        LOGGER.info('Sending Find Request: MsgID {}'.format(msg_id))
         LOGGER.info('')
-        LOGGER.info('# DICOM Dataset')
+        LOGGER.info('# Identifier DICOM Dataset')
         for elem in dataset:
             LOGGER.info(elem)
         LOGGER.info('')
+
+        # Pause the reactor to prevent a race condition
+        self._reactor_checkpoint.clear()
 
         # Send C-FIND request to the peer via DIMSE
         self.dimse.send_msg(req, context.context_id)
@@ -1105,14 +1023,15 @@ class Association(threading.Thread):
         #   may end up being sent first unless next() is called
         return self._wrap_find_responses(transfer_syntax)
 
-    def send_c_get(self, dataset, msg_id=1, priority=2, query_model='P'):
+    def send_c_get(self, dataset, query_model, msg_id=1, priority=2):
         """Send a C-GET request to the peer AE.
 
         Yields ``(status, identifier)`` pairs.
 
-        The ``AE.on_c_store`` callback should be implemented prior
-        to calling ``send_c_get`` as the peer will return any matches via a
-        C-STORE sub-operation over the current association. In addition,
+        A :py:meth:`handler <pynetdicom._handlers.doc_handle_store>`
+        should be implemented and bound to ``evt.EVT_C_STORE``
+        prior to calling ``send_c_get`` as the peer will return any matches
+        via a C-STORE sub-operation over the current association. In addition,
         SCP/SCU Role Selection Negotiation must be supported by the
         Association.
 
@@ -1122,6 +1041,10 @@ class Association(threading.Thread):
             The C-GET request's *Identifier* ``Dataset``. The exact
             requirements for the *Identifier* are Service Class specific (see
             the DICOM Standard, Part 4).
+        query_model : pydicom.uid.UID or str
+            The value to use for the C-GET request's (0000,0002) *Affected
+            SOP Class UID* parameter, which usually corresponds to the
+            Information Model that is to be used.
         msg_id : int, optional
             The DIMSE *Message ID*, must be between 0 and 65535, inclusive,
             (default 1).
@@ -1132,32 +1055,6 @@ class Association(threading.Thread):
             - ``0`` - Medium
             - ``1`` - High
             - ``2`` - Low (default)
-
-        query_model : str, optional
-            The Query/Retrieve Information Model to use, one of the following:
-
-            - ``P`` - *Patient Root Information Model - GET*
-              1.2.840.10008.5.1.4.1.2.1.3 (default)
-            - ``S`` - *Study Root Information Model - GET*
-              1.2.840.10008.5.1.4.1.2.2.3
-            - ``O`` - *Patient Study Only Information Model - GET*
-              1.2.840.10008.5.1.4.1.2.3.3
-            - ``C`` - *Composite Instance Root Retrieve - GET*
-              1.2.840.10008.5.1.4.1.2.4.3
-            - ``CB`` - *Composite Instance Retrieve Without Bulk Data - GET*
-              1.2.840.10008.5.1.4.1.2.5.3
-            - ``H`` - *Hanging Protocol Information Model - GET*
-              1.2.840.10008.5.1.4.38.4
-            - ``D`` - *Defined Procedure  Protocol Information Model - GET*
-              1.2.840.10008.5.1.4.20.3
-            - ``CP`` - *Palette Color Information Model - GET*
-              1.2.840.10008.5.1.4.39.4
-            - ``IG`` - *Generic Implant Template Information Model - GET*
-              1.2.840.10008.5.1.4.43.4
-            - ``IA`` - *Implant Assembly Template Information Model - GET*
-              1.2.840.10008.5.1.4.44.4
-            - ``IT`` - *Implant Template Group Information Model - GET*
-              1.2.840.10008.5.1.4.44.4
 
         Yields
         ------
@@ -1170,57 +1067,58 @@ class Association(threading.Thread):
             Section 9.1.2.1.5 and Annex C).
 
             The status for the requested C-GET operation should be one of the
-            following values, but as the returned value depends on the
-            peer this can't be assumed:
+            following values, but as the value depends on the peer this
+            can't be assumed:
 
-            General C-GET (DICOM Standard Part 7, Section 9.1.3 and Annex C)
+            *General C-GET* (DICOM Standard Part 7, Section 9.1.3 and Annex C)
 
             Success
-              | ``0x0000`` Sub-operations complete: no failures or warnings
+              | ``0x0000`` - Sub-operations complete: no failures or warnings
 
             Failure
-              | ``0x0122`` SOP class not supported
-              | ``0x0124`` Not authorised
-              | ``0x0210`` Duplicate invocation
-              | ``0x0211`` Unrecognised operation
-              | ``0x0212`` Mistyped argument
+              | ``0x0122`` - SOP class not supported
+              | ``0x0124`` - Not authorised
+              | ``0x0210`` - Duplicate invocation
+              | ``0x0211`` - Unrecognised operation
+              | ``0x0212`` - Mistyped argument
 
-            Query/Retrieve Service, Hanging Protocol Query/Retrieve Service,
+            *Query/Retrieve Service, Hanging Protocol Query/Retrieve Service,
             Defined Procedure Protocol Query/Retrieve Service, Color Palette
-            Query/Retrieve Service and Implant Template Query/Retrieve Service
-            specific (DICOM Standard Part 4, Annexes C.4.3, Y.C.4.2.1.4,
-            Z.4.2.1.4, U.4.3, X, BB and HH):
+            Query/Retrieve Service*, *Implant Template Query/Retrieve
+            Service* and *Protocol Approval Query/Retrieve Service* specific
+            (DICOM Standard Part 4, Annexes C.4.3,
+            Y.C.4.2.1.4, Z.4.2.1.4, U.4.3, X, BB, HH and II):
 
             Pending
-              | ``0xFF00`` Sub-operations are continuing
+              | ``0xFF00`` - Sub-operations are continuing
 
             Cancel
-              | ``0xFE00`` Sub-operations terminated due to Cancel indication
+              | ``0xFE00`` - Sub-operations terminated due to Cancel indication
 
             Failure
-              | ``0xA701`` Out of resources: unable to calculate number of
+              | ``0xA701`` - Out of resources: unable to calculate number of
                  matches
-              | ``0xA702`` Out of resources: unable to perform sub-operations
-              | ``0xA900`` Identifier does not match SOP class
-              | ``0xAA00`` None of the frames requested were found in the SOP
+              | ``0xA702`` - Out of resources: unable to perform sub-operations
+              | ``0xA900`` - Identifier does not match SOP class
+              | ``0xAA00`` - None of the frames requested were found in the SOP
                 instance
-              | ``0xAA01`` Unable to create new object for this SOP class
-              | ``0xAA02`` Unable to extract frames
-              | ``0xAA03`` Time-based request received for a non-time-based
+              | ``0xAA01`` - Unable to create new object for this SOP class
+              | ``0xAA02`` - Unable to extract frames
+              | ``0xAA03`` - Time-based request received for a non-time-based
                 original SOP Instance
-              | ``0xAA04`` Invalid request
-              | ``0xC000`` to ``0xCFFF`` Unable to process
+              | ``0xAA04`` - Invalid request
+              | ``0xC000`` to ``0xCFFF`` - Unable to process
 
             Warning
-              | ``0xB000`` Sub-operations completed: one or more failures or
+              | ``0xB000`` - Sub-operations completed: one or more failures or
                  warnings
 
         identifier : pydicom.dataset.Dataset or None
-            If the status is 'Pending' or 'Success' then yields ``None``. If
-            the status is 'Warning', 'Failure' or 'Cancel' then yields a
-            ``Dataset`` which should contain an (0008,0058) *Failed SOP
-            Instance UID List* element, however this is not guaranteed and may
-            instead return an empty ``Dataset``.
+            If the status category is 'Pending' or 'Success' then yields
+            ``None``. If the status category is 'Warning', 'Failure' or
+            'Cancel' then yields a ``Dataset`` which should contain an
+            (0008,0058) *Failed SOP Instance UID List* element, however this
+            is not guaranteed and may instead be an empty ``Dataset``.
 
         Raises
         ------
@@ -1232,13 +1130,12 @@ class Association(threading.Thread):
 
         See Also
         --------
-        ae.ApplicationEntity.on_c_get
-        ae.ApplicationEntity.on_c_store
         service_class.QueryRetrieveGetServiceClass
         service_class.HangingProtocolQueryRetrieveServiceClass
         service_class.DefinedProcedureProtocolQueryRetrieveServiceClass
         service_class.ColorPaletteQueryRetrieveServiceClass
         service_class.ImplantTemplateQueryRetrieveServiceClass
+        service_class.ProtocolApprovalQueryRetrieveServiceClass
         dimse_primitives.C_GET
 
         References
@@ -1251,6 +1148,7 @@ class Association(threading.Thread):
         * DICOM Standard Part 4, `Annex Z <http://dicom.nema.org/medical/dicom/current/output/html/part04.html#chapter_Z>`_
         * DICOM Standard Part 4, `Annex BB <http://dicom.nema.org/medical/dicom/current/output/html/part04.html#chapter_BB>`_
         * DICOM Standard Part 4, `Annex HH <http://dicom.nema.org/medical/dicom/current/output/html/part04.html#chapter_HH>`_
+        * DICOM Standard Part 4, `Annex II <http://dicom.nema.org/medical/dicom/current/output/html/part04.html#chapter_II>`_
         * DICOM Standard Part 7, Sections
           `9.1.3 <http://dicom.nema.org/medical/dicom/current/output/html/part07.html#sect_9.1.3>`_,
           `9.3.3 <http://dicom.nema.org/medical/dicom/current/output/html/part07.html#sect_9.3.3>`_
@@ -1261,30 +1159,9 @@ class Association(threading.Thread):
             raise RuntimeError("The association with a peer SCP must be "
                                "established before sending a C-GET request")
 
-        _sop_classes = {
-            "P" : PatientRootQueryRetrieveInformationModelGet,
-            "S" : StudyRootQueryRetrieveInformationModelGet,
-            "O" : PatientStudyOnlyQueryRetrieveInformationModelGet,
-            "C" : CompositeInstanceRootRetrieveGet,
-            "CB" : CompositeInstanceRetrieveWithoutBulkDataGet,
-            "H" : HangingProtocolInformationModelGet,
-            "D" : DefinedProcedureProtocolInformationModelGet,
-            "CP" : ColorPaletteInformationModelGet,
-            "IG" : GenericImplantTemplateInformationModelGet,
-            "IA" : ImplantAssemblyTemplateInformationModelGet,
-            "IT" : ImplantTemplateGroupInformationModelGet,
-        }
-
-        try:
-            sop_class = _sop_classes[query_model]
-        except KeyError:
-            raise ValueError(
-                "Unsupported value for `query_model`: {}".format(query_model)
-            )
-
         # Determine the Presentation Context we are operating under
         #   and hence the transfer syntax to use for encoding `dataset`
-        context = self._get_valid_context(sop_class, '', 'scu')
+        context = self._get_valid_context(query_model, '', 'scu')
 
         # Build C-GET request primitive
         #   (M) Message ID
@@ -1293,7 +1170,7 @@ class Association(threading.Thread):
         #   (M) Identifier
         req = C_GET()
         req.MessageID = msg_id
-        req.AffectedSOPClassUID = sop_class
+        req.AffectedSOPClassUID = query_model
         req.Priority = priority
 
         # Encode the Identifier `dataset` using the agreed transfer syntax
@@ -1310,12 +1187,15 @@ class Association(threading.Thread):
             raise ValueError('Failed to encode the supplied Identifer '
                              'dataset')
 
-        LOGGER.info('Get SCU Request Identifier:')
+        LOGGER.info('Sending Get Request: MsgID {}'.format(msg_id))
         LOGGER.info('')
-        LOGGER.info('# DICOM Dataset')
+        LOGGER.info('# Identifier DICOM Dataset')
         for elem in dataset:
             LOGGER.info(elem)
         LOGGER.info('')
+
+        # Pause the reactor to prevent a race condition
+        self._reactor_checkpoint.clear()
 
         # Send C-GET request to the peer via DIMSE
         self.dimse.send_msg(req, context.context_id)
@@ -1326,8 +1206,8 @@ class Association(threading.Thread):
         #   may end up being sent first unless next() is called
         return self._wrap_get_move_responses(transfer_syntax)
 
-    def send_c_move(self, dataset, move_aet, msg_id=1, priority=2,
-                    query_model='P'):
+    def send_c_move(self, dataset, move_aet, query_model, msg_id=1,
+                    priority=2):
         """Send a C-MOVE request to the peer AE.
 
         Yields ``(status, identifier)`` pairs.
@@ -1344,41 +1224,23 @@ class Association(threading.Thread):
             requirements for the *Identifier* are Service Class specific (see
             the DICOM Standard, Part 4).
         move_aet : bytes
-            The AE title of the destination for the C-STORE sub-operations
-            performed by the peer.
+            The value of the *Move Destination* parameter for the C-MOVE
+            request, should be the AE title of the Storage SCP for the
+            C-STORE sub-operations performed by the peer.
+        query_model : pydicom.uid.UID or str
+            The value to use for the C-MOVE request's (0000,0002) *Affected
+            SOP Class UID* parameter, which usually corresponds to the
+            Information Model that is to be used.
         msg_id : int, optional
             The DIMSE *Message ID*, must be between 0 and 65535, inclusive,
             (default 1).
         priority : int, optional
-            The C-MOVE operation *Priority* (if supported by the peer), one of:
+            The value of the *Priority* parameter (if supported by the peer),
+            one of:
 
             - ``0`` - Medium
             - ``1`` - High
             - ``2`` - Low (default)
-
-        query_model : str, optional
-            The Query/Retrieve Information Model to use, one of the following:
-
-            - ``P`` - *Patient Root Information Model - MOVE*
-              1.2.840.10008.5.1.4.1.2.1.2 (default)
-            - ``S`` - *Study Root Information Model - MOVE*
-              1.2.840.10008.5.1.4.1.2.2.2
-            - ``O`` - *Patient Study Only Information Model - MOVE*
-              1.2.840.10008.5.1.4.1.2.3.2
-            - ``C`` - *Composite Instance Root Retrieve - MOVE*
-              1.2.840.10008.5.1.4.1.2.4.2
-            - ``H`` - *Hanging Protocol Information Model - MOVE*
-              1.2.840.10008.5.1.4.38.3
-            - ``D`` - *Defined Procedure Protocol Information Model - MOVE*
-              1.2.840.10008.5.1.4.20.2
-            - ``CP`` - *Color Palette Information Model - MOVE*
-              1.2.840.10008.5.1.4.39.3
-            - ``IG`` - *Generic Implant Template Information Model - MOVE*
-              1.2.840.10008.5.1.4.43.3
-            - ``IA`` - *Implant Assembly Template Information Model - MOVE*
-              1.2.840.10008.5.1.4.44.3
-            - ``IT`` - *Implant Template Group Information Model - MOVE*
-              1.2.840.10008.5.1.4.44.3
 
         Yields
         ------
@@ -1391,63 +1253,62 @@ class Association(threading.Thread):
             Section 9.1.4 and Annex C).
 
             The status for the requested C-MOVE operation should be one of the
-            following values, but as the returned value depends
+            following values, but as the value depends
             on the peer this can't be assumed:
 
-            General C-MOVE (DICOM Standard Part 7, 9.1.4.1.7 and Annex C)
+            *General C-MOVE* (DICOM Standard Part 7, 9.1.4.1.7 and Annex C)
 
             Cancel
-              | ``0xFE00`` Sub-operations terminated due to Cancel indication
+              | ``0xFE00`` - Sub-operations terminated due to Cancel indication
 
             Success
-              | ``0x0000`` Sub-operations complete: no failures
+              | ``0x0000`` - Sub-operations complete: no failures
 
             Failure
-              | ``0x0122`` SOP class not supported
+              | ``0x0122`` - SOP class not supported
 
-            Query/Retrieve Service, Hanging Protocol Query/Retrieve Service,
+            *Query/Retrieve Service, Hanging Protocol Query/Retrieve Service,
             Defined Procedure Protocol Query/Retrieve Service, Color Palette
-            Query/Retrieve Service and Implant Template Query/Retreive
-            Service
+            Query/Retrieve Service* , *Implant Template Query/Retreive
+            Service* and *Protocol Approval Query/Retrieve Service*
             specific (DICOM Standard Part 4, Annexes C, U, Y, X, BB and HH):
 
             Failure
-              | ``0xA701`` Out of resources: unable to calculate number of
+              | ``0xA701`` - Out of resources: unable to calculate number of
                 matches
-              | ``0xA702`` Out of resources: unable to perform sub-operations
-              | ``0xA801`` Move destination unknown
-              | ``0xA900`` Identifier does not match SOP Class
-              | ``0xAA00`` None of the frames requested were found in the SOP
+              | ``0xA702`` - Out of resources: unable to perform sub-operations
+              | ``0xA801`` - Move destination unknown
+              | ``0xA900`` - Identifier does not match SOP Class
+              | ``0xAA00`` - None of the frames requested were found in the SOP
                 instance
-              | ``0xAA01`` Unable to create new object for this SOP class
-              | ``0xAA02`` Unable to extract frames
-              | ``0xAA03`` Time-based request received for a non-time-based
+              | ``0xAA01`` - Unable to create new object for this SOP class
+              | ``0xAA02`` - Unable to extract frames
+              | ``0xAA03`` - Time-based request received for a non-time-based
                 original SOP Instance
-              | ``0xAA04`` Invalid request
-              | ``0xC000`` to ``0xCFFF`` Unable to process
+              | ``0xAA04`` - Invalid request
+              | ``0xC000`` to ``0xCFFF`` - Unable to process
 
             Pending
-              | ``0xFF00`` Sub-operations are continuing
+              | ``0xFF00`` - Sub-operations are continuing
 
             Warning
-              | ``0xB000`` Sub-operations complete: one or more failures
+              | ``0xB000`` - Sub-operations complete: one or more failures
 
         identifier : pydicom.dataset.Dataset or None
-            If the status is 'Pending' or 'Success' then yields ``None``. If
-            the status is 'Warning', 'Failure' or 'Cancel' then yields a
-            ``Dataset`` which should contain an (0008,0058) *Failed SOP
-            Instance UID List* element, however this is not guaranteed and may
-            instead return an empty ``Dataset``.
+            If the status category is 'Pending' or 'Success' then yields
+            ``None``. If the status category is 'Warning', 'Failure' or
+            'Cancel' then yields a ``Dataset`` which should contain an
+            (0008,0058) *Failed SOP Instance UID List* element, however this
+            is not guaranteed and may instead be an empty ``Dataset``.
 
         See Also
         --------
-        ae.ApplicationEntity.on_c_move
-        ae.ApplicationEntity.on_c_store
         dimse_primitives.C_MOVE
         service_class.QueryRetrieveMoveServiceClass
         service_class.HangingProtocolQueryRetrieveServiceClass
         service_class.ColorPaletteQueryRetrieveServiceClass
         service_class.ImplantTemplateQueryRetrieveServiceClass
+        service_class.ProtocolApprovalQueryRetrieveServiceClass
 
         References
         ----------
@@ -1458,6 +1319,7 @@ class Association(threading.Thread):
         * DICOM Standard Part 4, `Annex Y <http://dicom.nema.org/medical/dicom/current/output/html/part04.html#chapter_Y>`_
         * DICOM Standard Part 4, `Annex BB <http://dicom.nema.org/medical/dicom/current/output/html/part04.html#chapter_BB>`_
         * DICOM Standard Part 4, `Annex HH <http://dicom.nema.org/medical/dicom/current/output/html/part04.html#chapter_HH>`_
+        * DICOM Standard Part 4, `Annex II <http://dicom.nema.org/medical/dicom/current/output/html/part04.html#chapter_II>`_
         * DICOM Standard Part 7, Sections
           `9.1.4 <http://dicom.nema.org/medical/dicom/current/output/html/part07.html#sect_9.1.4>`_,
           `9.3.4 <http://dicom.nema.org/medical/dicom/current/output/html/part07.html#sect_9.3.4>`_
@@ -1468,29 +1330,9 @@ class Association(threading.Thread):
             raise RuntimeError("The association with a peer SCP must be "
                                "established before sending a C-MOVE request")
 
-        _sop_classes = {
-            "P" : PatientRootQueryRetrieveInformationModelMove,
-            "S" : StudyRootQueryRetrieveInformationModelMove,
-            "O" : PatientStudyOnlyQueryRetrieveInformationModelMove,
-            "C" : CompositeInstanceRootRetrieveMove,
-            "H" : HangingProtocolInformationModelMove,
-            "D" : DefinedProcedureProtocolInformationModelMove,
-            "CP" : ColorPaletteInformationModelMove,
-            "IG" : GenericImplantTemplateInformationModelMove,
-            "IA" : ImplantAssemblyTemplateInformationModelMove,
-            "IT" : ImplantTemplateGroupInformationModelMove,
-        }
-
-        try:
-            sop_class = _sop_classes[query_model]
-        except KeyError:
-            raise ValueError(
-                "Unsupported value for `query_model`: {}".format(query_model)
-            )
-
         # Determine the Presentation Context we are operating under
         #   and hence the transfer syntax to use for encoding `dataset`
-        context = self._get_valid_context(sop_class, '', 'scu')
+        context = self._get_valid_context(query_model, '', 'scu')
 
         # Build C-MOVE request primitive
         #   (M) Message ID
@@ -1500,7 +1342,7 @@ class Association(threading.Thread):
         #   (M) Identifier
         req = C_MOVE()
         req.MessageID = msg_id
-        req.AffectedSOPClassUID = sop_class
+        req.AffectedSOPClassUID = query_model
         req.Priority = priority
         req.MoveDestination = move_aet
 
@@ -1518,12 +1360,15 @@ class Association(threading.Thread):
             raise ValueError('Failed to encode the supplied Identifier '
                              'dataset')
 
-        LOGGER.info('Move SCU Request Identifier:')
+        LOGGER.info('Sending Move Request: MsgID {}'.format(msg_id))
         LOGGER.info('')
-        LOGGER.info('# DICOM Dataset')
+        LOGGER.info('# Identifier DICOM Dataset')
         for elem in dataset:
             LOGGER.info(elem)
         LOGGER.info('')
+
+        # Pause the reactor to prevent a race condition
+        self._reactor_checkpoint.clear()
 
         # Send C-MOVE request to the peer via DIMSE and wait for the response
         self.dimse.send_msg(req, context.context_id)
@@ -1553,11 +1398,15 @@ class Association(threading.Thread):
             - ``1`` - High
             - ``2`` - Low (default)
         originator_aet : bytes, optional
-            The AE title of the peer that invoked the C-MOVE operation for
+            The value of the *Move Originator Application Entity Title*
+            parameter for the C-STORE request. This is the AE title of the
+            peer that invoked the C-MOVE operation for
             which this C-STORE sub-operation is being performed (default
             ``None``).
         originator_id : int, optional
-            The Message ID of the C-MOVE request primitive from which this
+            The value of the *Move Originator Message ID* parameter for the
+            C-STORE request. This is the original *Message ID* parameter value
+            for the C-MOVE request primitive for which the
             C-STORE sub-operation is being performed (default ``None``).
 
         Returns
@@ -1574,39 +1423,39 @@ class Association(threading.Thread):
             following, but as the value depends on the peer SCP this can't be
             assumed:
 
-            General C-STORE (DICOM Standard Part 7, 9.1.1.1.9 and Annex C):
+            *General C-STORE* (DICOM Standard Part 7, 9.1.1.1.9 and Annex C):
 
             Success
-              | ``0x0000`` Success
+              | ``0x0000`` - Success
 
             Failure
-              | ``0x0117`` Invalid SOP instance
-              | ``0x0122`` SOP class not supported
-              | ``0x0124`` Not authorised
-              | ``0x0210`` Duplicate invocation
-              | ``0x0211`` Unrecognised operation
-              | ``0x0212`` Mistyped argument
+              | ``0x0117`` - Invalid SOP instance
+              | ``0x0122`` - SOP class not supported
+              | ``0x0124`` - Not authorised
+              | ``0x0210`` - Duplicate invocation
+              | ``0x0211`` - Unrecognised operation
+              | ``0x0212`` - Mistyped argument
 
-            Storage Service and Non-Patient Object Storage Service specific
+            *Storage Service* and *Non-Patient Object Storage Service* specific
             (DICOM Standard Part 4, Annexes B.2.3 and GG):
 
             Failure
-              | ``0xA700`` to ``0xA7FF`` Out of resources
-              | ``0xA900`` to ``0xA9FF`` Data set does not match SOP class
-              | ``0xC000`` to ``0xCFFF`` Cannot understand
+              | ``0xA700`` to ``0xA7FF`` - Out of resources
+              | ``0xA900`` to ``0xA9FF`` - Data set does not match SOP class
+              | ``0xC000`` to ``0xCFFF`` - Cannot understand
 
             Warning
-              | ``0xB000`` Coercion of data elements
-              | ``0xB006`` Element discarded
-              | ``0xB007`` Data set does not match SOP class
+              | ``0xB000`` - Coercion of data elements
+              | ``0xB006`` - Element discarded
+              | ``0xB007`` - Data set does not match SOP class
 
-            Non-Patient Object Service Class specific (DICOM Standard Part 4,
+            *Non-Patient Object Service Class* specific (DICOM Standard Part 4,
             Annex GG.4.2)
 
             Failure
-              | ``0xA700`` Out of resources
-              | ``0xA900`` Data set does not match SOP class
-              | ``0xC000`` Cannot understand
+              | ``0xA700`` - Out of resources
+              | ``0xA900`` - Data set does not match SOP class
+              | ``0xC000`` - Cannot understand
 
         Raises
         ------
@@ -1622,7 +1471,6 @@ class Association(threading.Thread):
 
         See Also
         --------
-        ae.ApplicationEntity.on_c_store
         dimse_primitives.C_STORE
         service_class.StorageServiceClass
         service_class.NonPatientObjectStorageServiceClass
@@ -1695,9 +1543,15 @@ class Association(threading.Thread):
             LOGGER.error("Failed to encode the supplied Dataset")
             raise ValueError('Failed to encode the supplied Dataset')
 
+        # Pause the reactor to prevent a race condition
+        self._reactor_checkpoint.clear()
+
         # Send C-STORE request to the peer via DIMSE and wait for the response
         self.dimse.send_msg(req, context.context_id)
         cx_id, rsp = self.dimse.get_msg(block=True)
+
+        # Unpause the reactor
+        self._reactor_checkpoint.set()
 
         # If `rsp` is None then the DIMSE timeout expired so abort
         if rsp is None:
@@ -1740,6 +1594,8 @@ class Association(threading.Thread):
                 if self.is_established:
                     LOGGER.error("Connection closed or timed-out")
                     self.abort()
+
+                self._reactor_checkpoint.set()
                 yield Dataset(), None
                 return
 
@@ -1749,6 +1605,7 @@ class Association(threading.Thread):
                     .format(rsp.__class__.__name__.replace('_', '-'))
                 )
                 self.abort()
+                self._reactor_checkpoint.set()
                 yield Dataset(), None
                 return
 
@@ -1757,6 +1614,7 @@ class Association(threading.Thread):
                     'Received an invalid C-FIND response from the peer'
                 )
                 self.abort()
+                self._reactor_checkpoint.set()
                 yield Dataset(), None
                 return
 
@@ -1778,16 +1636,13 @@ class Association(threading.Thread):
             LOGGER.debug('')
             if category == STATUS_PENDING:
                 LOGGER.info(
-                    "Find SCP Response: {} (Pending)".format(operation_no)
+                    "Find SCP Response: {} - 0x{:04x} (Pending)"
+                    .format(operation_no, status.Status)
                 )
-            elif category in [STATUS_SUCCESS, STATUS_CANCEL, STATUS_WARNING]:
+            else:
                 LOGGER.info(
-                    'Find SCP Result: ({})'.format(category)
-                )
-            elif category == STATUS_FAILURE:
-                LOGGER.info(
-                    'Find SCP Result: (Failure - 0x{:04x})'
-                    .format(status.Status)
+                    'Find SCP Result: 0x{:04x} ({})'
+                    .format(status.Status, category)
                 )
 
             # 'Success', 'Warning', 'Failure', 'Cancel' are final yields,
@@ -1796,28 +1651,33 @@ class Association(threading.Thread):
             if category in [STATUS_PENDING]:
                 operation_no += 1
 
-                try:
-                    identifier = decode(rsp.Identifier,
-                                        transfer_syntax.is_implicit_VR,
-                                        transfer_syntax.is_little_endian)
-                    LOGGER.debug('')
-                    LOGGER.debug('# DICOM Dataset')
-                    for elem in identifier:
-                        LOGGER.debug(elem)
-                    LOGGER.debug('')
-                except Exception:
-                    LOGGER.error(
-                        "Failed to decode the received Identifier dataset"
-                    )
-                    yield status, None
+                with self.lock:
+                    try:
+                        identifier = decode(rsp.Identifier,
+                                            transfer_syntax.is_implicit_VR,
+                                            transfer_syntax.is_little_endian)
+                        LOGGER.debug('')
+                        LOGGER.debug('# Identifier DICOM Dataset')
+                        for elem in identifier:
+                            LOGGER.debug(elem)
+                        LOGGER.debug('')
+                    except Exception:
+                        LOGGER.error(
+                            "Failed to decode the received Identifier dataset"
+                        )
+                        yield status, None
 
                 yield status, identifier
                 continue
 
             # Only reach this point if status is Sucess, Warning, Failure
             #   or Cancel
+            self._reactor_checkpoint.set()
             yield status, identifier
             break
+
+        # Unpause the reactor
+        self._reactor_checkpoint.set()
 
     def _wrap_get_move_responses(self, transfer_syntax):
         """Wrapper for the C-GET/C-MOVE response generators.
@@ -1852,6 +1712,8 @@ class Association(threading.Thread):
                 if self.is_established:
                     LOGGER.error("Connection closed or timed-out")
                     self.abort()
+
+                self._reactor_checkpoint.set()
                 yield Dataset(), None
                 return
 
@@ -1861,6 +1723,7 @@ class Association(threading.Thread):
                     .format(rsp_type)
                 )
                 self.abort()
+                self._reactor_checkpoint.set()
                 yield Dataset(), None
                 return
 
@@ -1876,6 +1739,7 @@ class Association(threading.Thread):
                     .format(rsp_type)
                 )
                 self.abort()
+                self._reactor_checkpoint.set()
                 yield Dataset(), None
                 return
 
@@ -1897,17 +1761,13 @@ class Association(threading.Thread):
             LOGGER.debug('')
             if category == STATUS_PENDING:
                 LOGGER.info(
-                    "{} SCP Response: {} (Pending)"
-                    .format(rsp_name[rsp_type], operation_no + 1)
+                    "{} SCP Response: {} - 0x{:04x} (Pending)"
+                    .format(rsp_name[rsp_type], operation_no, status.Status)
                 )
-            elif category in [STATUS_SUCCESS, STATUS_CANCEL, STATUS_WARNING]:
+            else:
                 LOGGER.info(
-                    '{} SCP Result: ({})'.format(rsp_name[rsp_type], category)
-                )
-            elif category == STATUS_FAILURE:
-                LOGGER.info(
-                    '{} SCP Result: (Failure - 0x{:04x})'
-                    .format(rsp_name[rsp_type], status.Status)
+                    '{} SCP Result: 0x{:04x} ({})'
+                    .format(rsp_name[rsp_type], status.Status, category)
                 )
 
             # Log number of remaining sub-operations - C-GET/C-MOVE only
@@ -1935,48 +1795,61 @@ class Association(threading.Thread):
                 #   with a (0008,0058) Failed SOP Instance UID List
                 #    element however this can't be assumed
                 # pylint: disable=broad-except
-                try:
-                    identifier = decode(rsp.Identifier,
-                                        transfer_syntax.is_implicit_VR,
-                                        transfer_syntax.is_little_endian)
-                    LOGGER.debug('')
-                    LOGGER.debug('# DICOM Dataset')
-                    for elem in identifier:
-                        LOGGER.debug(elem)
-                    LOGGER.debug('')
-                except Exception as ex:
-                    LOGGER.error(
-                        "Failed to decode the received Identifier dataset"
-                    )
-                    LOGGER.exception(ex)
-                    identifier = None
+                with self.lock:
+                    try:
+                        identifier = decode(rsp.Identifier,
+                                            transfer_syntax.is_implicit_VR,
+                                            transfer_syntax.is_little_endian)
+                        if identifier:
+                            LOGGER.debug('')
+                            LOGGER.debug('# Identifier DICOM Dataset')
+                            for elem in identifier:
+                                LOGGER.debug(elem)
+                            LOGGER.debug('')
+                    except Exception as ex:
+                        LOGGER.error(
+                            "Failed to decode the received Identifier dataset"
+                        )
+                        LOGGER.exception(ex)
+                        identifier = None
 
             # Only reach this point if status is Sucess, Warning, Failure
             #   or Cancel
+            self._reactor_checkpoint.set()
             yield status, identifier
             break
 
+        # Unpause the reactor
+        self._reactor_checkpoint.set()
+
     # DIMSE-N services provided by the Association
     def send_n_action(self, dataset, action_type, class_uid, instance_uid,
-                      msg_id=1):
+                      msg_id=1, meta_uid=None):
         """Send an N-ACTION request message to the peer AE.
 
         Parameters
         ----------
         dataset : pydicom.dataset.Dataset or None
             The dataset that will be sent as the *Action Information*
-            parameter in the N-ACTION request, or None if not required.
+            parameter in the N-ACTION request, or ``None`` if not required.
         action_type : int
-            The value of the request's (0000,1008) *Action Type ID* element.
+            The value of the request's (0000,1008) *Action Type ID* parameter.
         class_uid : pydicom.uid.UID
-            The UID to be sent in the request's (0000,0003) *Requested SOP
-            Class UID* element.
+            The UID to be sent for the request's (0000,0003) *Requested SOP
+            Class UID* parameter.
         instance_uid : pydicom.uid.UID
-            The UID to be sent in the request's (0000,1001) *Requested SOP
-            Instance UID* element.
+            The UID to be sent for the request's (0000,1001) *Requested SOP
+            Instance UID* parameter.
         msg_id : int, optional
-            The DIMSE *Message ID*, must be between 0 and 65535, inclusive,
-            (default 1).
+            The request's *Message ID* parameter value, must be between 0 and
+            65535, inclusive, (default 1).
+        meta_uid : pydicom.uid.UID, optional
+            If the service class operates under a presentation context
+            negotiated using a *Meta SOP Class* rather than a standard *SOP
+            Class* (such as with *Print Management* service class and its
+            *Basic Grayscale Print Management Meta SOP Class*) then this
+            value will be used to determine the corresponding presentation
+            context.
 
         Returns
         -------
@@ -1988,35 +1861,38 @@ class Association(threading.Thread):
             optionally contain additional elements (see the DICOM Standard,
             Part 7, Section 9.1.2.1.5 and Annex C).
 
-            General N-ACTION (DICOM Standard Part 7, Section 10.1.4 and
+            *General N-ACTION* (DICOM Standard Part 7, Section 10.1.4 and
             Annex C)
 
             Success
-              | ``0x0000`` Successful operation
+              | ``0x0000`` - Successful operation
 
             Failure
-              | ``0x0110`` Processing failure
-              | ``0x0112`` No such SOP Instance
-              | ``0x0114`` No such argument
-              | ``0x0115`` Invalid argument value
-              | ``0x0117`` Invalid object instance
-              | ``0x0118`` No such SOP Class
-              | ``0x0119`` Class-Instance conflict
-              | ``0x0123`` No such action
-              | ``0x0124`` Not authorised
-              | ``0x0210`` Duplicate invocation
-              | ``0x0211`` Unrecognised operation
-              | ``0x0212`` Mistyped argument
-              | ``0x0213`` Resource limitation
+              | ``0x0110`` - Processing failure
+              | ``0x0112`` - No such SOP Instance
+              | ``0x0114`` - No such argument
+              | ``0x0115`` - Invalid argument value
+              | ``0x0117`` - Invalid object instance
+              | ``0x0118`` - No such SOP Class
+              | ``0x0119`` - Class-Instance conflict
+              | ``0x0123`` - No such action
+              | ``0x0124`` - Not authorised
+              | ``0x0210`` - Duplicate invocation
+              | ``0x0211`` - Unrecognised operation
+              | ``0x0212`` - Mistyped argument
+              | ``0x0213`` - Resource limitation
 
         action_reply : pydicom.dataset.Dataset or None
-            If the status is 'Success' then a ``Dataset`` containing attributes
-            corresponding to those supplied in the *Action Reply*,
-            otherwise returns None.
+            If the status category is 'Success' or 'Warning' then a ``Dataset``
+            containing attributes corresponding to those supplied in the
+            *Action Reply*. Because *Action Reply* is optional the returned
+            ``Dataset`` may be empty.
+
+            If the status category is 'Failure' or if the peer timed-out,
+            aborted, or sent an invalid response then returns ``None``.
 
         See Also
         --------
-        ae.ApplicationEntity.on_n_action
         dimse_primitives.N_ACTION
 
         References
@@ -2040,7 +1916,7 @@ class Association(threading.Thread):
 
         # Determine the Presentation Context we are operating under
         #   and hence the transfer syntax to use for encoding `dataset`
-        context = self._get_valid_context(class_uid, '', 'scu')
+        context = self._get_valid_context(meta_uid or class_uid, '', 'scu')
         transfer_syntax = context.transfer_syntax[0]
 
         # Build N-ACTION request primitive
@@ -2048,33 +1924,49 @@ class Association(threading.Thread):
         #   (M) Requested SOP Class UID
         #   (M) Requested SOP Instance UID
         #   (M) Action Type ID
+        #   (U) Action Information
         req = N_ACTION()
         req.MessageID = msg_id
         req.RequestedSOPClassUID = class_uid
         req.RequestedSOPInstanceUID = instance_uid
         req.ActionTypeID = action_type
 
-        # Encode the `dataset` using the agreed transfer syntax
-        #   Will return None if failed to encode
-        bytestream = encode(dataset,
-                            transfer_syntax.is_implicit_VR,
-                            transfer_syntax.is_little_endian)
+        # Action Information is optional
+        if dataset is not None:
+            # Encode the `dataset` using the agreed transfer syntax
+            #   Will return None if failed to encode
+            bytestream = encode(dataset,
+                                transfer_syntax.is_implicit_VR,
+                                transfer_syntax.is_little_endian)
 
-        if bytestream is not None:
-            req.ActionInformation = BytesIO(bytestream)
-        else:
-            LOGGER.error("Failed to encode the supplied Dataset")
-            raise ValueError('Failed to encode the supplied Dataset')
+            if bytestream is not None:
+                req.ActionInformation = BytesIO(bytestream)
+            else:
+                msg = (
+                    "Failed to encode the supplied 'Action Information' "
+                    "dataset"
+                )
+                LOGGER.error(msg)
+                raise ValueError(msg)
 
         # Send N-ACTION request to the peer via DIMSE and wait for the response
+        LOGGER.info('Sending Action Request: MsgID {}'.format(msg_id))
+
+        # Pause the reactor to prevent a race condition
+        self._reactor_checkpoint.clear()
+
         self.dimse.send_msg(req, context.context_id)
         cx_id, rsp = self.dimse.get_msg(block=True)
+
+        # Unpause the reactor
+        self._reactor_checkpoint.set()
 
         # If `rsp` is None then the DIMSE timeout expired so abort
         if rsp is None:
             if self.is_established:
                 LOGGER.error("Connection closed or timed-out")
                 self.abort()
+
             return Dataset(), None
 
         # Determine validity of the response and get the status
@@ -2088,37 +1980,51 @@ class Association(threading.Thread):
             if category not in [STATUS_WARNING, STATUS_SUCCESS]:
                 return status, action_reply
 
-            # Attempt to decode the response's dataset
-            # pylint: disable=broad-except
-            try:
-                action_reply = decode(rsp.ActionReply,
-                                      transfer_syntax.is_implicit_VR,
-                                      transfer_syntax.is_little_endian)
-            except Exception as ex:
-                LOGGER.error("Failed to decode the received dataset")
-                LOGGER.exception(ex)
-                # Failure: Processing failure
-                status.Status = 0x0110
+            bytestream = rsp.ActionReply
+            if bytestream and bytestream.getvalue() != b'':
+                # Attempt to decode the response's dataset
+                # pylint: disable=broad-except
+                try:
+                    action_reply = decode(bytestream,
+                                          transfer_syntax.is_implicit_VR,
+                                          transfer_syntax.is_little_endian)
+                except Exception as ex:
+                    LOGGER.error(
+                        "Unable to decode the received 'Action Reply' dataset"
+                    )
+                    LOGGER.exception(ex)
+                    # Failure: Processing failure
+                    status.Status = 0x0110
+            else:
+                action_reply = Dataset()
 
         return status, action_reply
 
-    def send_n_create(self, dataset, class_uid, instance_uid, msg_id=1):
+    def send_n_create(self, dataset, class_uid, instance_uid=None, msg_id=1,
+                      meta_uid=None):
         """Send an N-CREATE request message to the peer AE.
 
         Parameters
         ----------
         dataset : pydicom.dataset.Dataset or None
             The dataset that will be sent as the *Attribute List*
-            parameter in the N-CREATE request, or None if not required.
+            parameter in the N-CREATE request, or ``None`` if not required.
         class_uid : pydicom.uid.UID
-            The UID to be sent in the request's (0000,0002) *Affected SOP
-            Class UID* element.
-        instance_uid : pydicom.uid.UID or None
-            The UID to be sent in the request's (0000,1000) *Affected SOP
-            Instance UID* element or None if not required.
+            The UID to be sent for the request's (0000,0002) *Affected SOP
+            Class UID* parameter.
+        instance_uid : pydicom.uid.UID, optional
+            The UID to be sent for the request's (0000,1000) *Affected SOP
+            Instance UID* parameter.
         msg_id : int, optional
-            The DIMSE *Message ID*, must be between 0 and 65535, inclusive,
-            (default 1).
+            The request's *Message ID* parameter value, must be between 0 and
+            65535, inclusive, (default 1).
+        meta_uid : pydicom.uid.UID, optional
+            If the service class operates under a presentation context
+            negotiated using a *Meta SOP Class* rather than a standard *SOP
+            Class* (such as with *Print Management* service class and its
+            *Basic Grayscale Print Management Meta SOP Class*) then this
+            value will be used to determine the corresponding presentation
+            context.
 
         Returns
         -------
@@ -2130,35 +2036,80 @@ class Association(threading.Thread):
             optionally contain additional elements (see the DICOM Standard,
             Part 7, Section 9.1.2.1.5 and Annex C).
 
-            General N-CREATE (DICOM Standard Part 7, Section 10.1.5 and
+            *General N-CREATE* (DICOM Standard Part 7, Section 10.1.5 and
             Annex C)
 
             Success
-              | ``0x0000`` Successful operation
+              | ``0x0000`` - Successful operation
 
             Failure
-              | ``0x0110`` Processing failure
-              | ``0x0112`` No such SOP Instance
-              | ``0x0114`` No such argument
-              | ``0x0115`` Invalid argument value
-              | ``0x0117`` Invalid object instance
-              | ``0x0118`` No such SOP Class
-              | ``0x0119`` Class-Instance conflict
-              | ``0x0123`` No such action
-              | ``0x0124`` Not authorised
-              | ``0x0210`` Duplicate invocation
-              | ``0x0211`` Unrecognised operation
-              | ``0x0212`` Mistyped argument
-              | ``0x0213`` Resource limitation
+              | ``0x0110`` - Processing failure
+              | ``0x0112`` - No such SOP Instance
+              | ``0x0114`` - No such argument
+              | ``0x0115`` - Invalid argument value
+              | ``0x0117`` - Invalid object instance
+              | ``0x0118`` - No such SOP Class
+              | ``0x0119`` - Class-Instance conflict
+              | ``0x0123`` - No such action
+              | ``0x0124`` - Not authorised
+              | ``0x0210`` - Duplicate invocation
+              | ``0x0211`` - Unrecognised operation
+              | ``0x0212`` - Mistyped argument
+              | ``0x0213`` - Resource limitation
+
+            *Print Management Service* specific (DICOM
+            Standard Part 4, Annex H.4.1.2.1.2, H.4.2.2.1.2 and H.4.9.2.1.2):
+
+            Warning
+              | ``0xB600`` - Memory allocation not supported
+              | ``0xB605`` - Requested Min Density or Max Density outside of
+                printer's operating range. The printer will use its respective
+                minimum or maximum density value instead
+
+            Failure
+              | ``0xC616`` - There is an existing Film Box that has not been
+                printed and N-ACTION at the Film Session level is not supported.
+                A new Film Box will not be created when a previous Film Box has
+                not been printed
+
+            *Media Creation Management Service* specific (DICOM
+            Standard Part 4, Annex S.3.2.1.4):
+
+            Failure
+              | ``0xA510`` - Failed: an initiate media creation action has already been
+                received for this SOP Instance
+
+            *Unified Procedure Step Service* specific (DICOM
+            Standard Part 4, Annex CC.2.5.4):
+
+            Warning
+              | ``0xB300`` - THE UPS was created with modifications
+
+            Failure
+              | ``0xC309`` - The provided value of UPS State was not 'SCHEDULED'
+
+            *RT Machine Verification Service* specific (DICOM
+            Standard Part 4, Annex DD.3.2.1.2):
+
+            Failure
+              | ``0xC221`` - The Referenced Fraction Group Number does not exist in the
+                referenced plan
+              | ``0xC222`` - No beams exist within the referenced fraction group
+              | ``0xC223`` - SCU already verifying and cannot currently process this
+                request
+              | ``0xC227`` - No such object instance - Referenced RT Plan not found
 
         attribute_list : pydicom.dataset.Dataset or None
-            If the status is 'Success' then a ``Dataset`` containing attributes
-            corresponding to those supplied in the *Attribute List*,
-            otherwise returns None.
+            If the status category is 'Success' or 'Warning' then a ``Dataset``
+            containing attributes corresponding to those supplied in the
+            *Attribute List*. Because *Attribute List* is optional the returned
+            ``Dataset`` may be empty.
+
+            If the status category is 'Failure' or if the peer timed-out,
+            aborted, or sent an invalid response then returns ``None``.
 
         See Also
         --------
-        ae.ApplicationEntity.on_n_create
         dimse_primitives.N_CREATE
 
         References
@@ -2182,33 +2133,45 @@ class Association(threading.Thread):
 
         # Determine the Presentation Context we are operating under
         #   and hence the transfer syntax to use for encoding `dataset`
-        context = self._get_valid_context(class_uid, '', 'scu')
+        context = self._get_valid_context(meta_uid or class_uid, '', 'scu')
         transfer_syntax = context.transfer_syntax[0]
 
         # Build N-CREATE request primitive
         #   (M) Message ID
         #   (M) Affected SOP Class UID
-        #   (M) Affected SOP Instance UID
+        #   (U) Affected SOP Instance UID
+        #   (U) Attribute List
         req = N_CREATE()
         req.MessageID = msg_id
         req.AffectedSOPClassUID = class_uid
         req.AffectedSOPInstanceUID = instance_uid
 
-        # Encode the `dataset` using the agreed transfer syntax
-        #   Will return None if failed to encode
-        bytestream = encode(dataset,
-                            transfer_syntax.is_implicit_VR,
-                            transfer_syntax.is_little_endian)
+        # Attribute List is optional
+        if dataset is not None:
+            # Encode the `dataset` using the agreed transfer syntax
+            #   Will return None if failed to encode
+            bytestream = encode(dataset,
+                                transfer_syntax.is_implicit_VR,
+                                transfer_syntax.is_little_endian)
 
-        if bytestream is not None:
-            req.AttributeList = BytesIO(bytestream)
-        else:
-            LOGGER.error("Failed to encode the supplied Dataset")
-            raise ValueError('Failed to encode the supplied Dataset')
+            if bytestream is not None:
+                req.AttributeList = BytesIO(bytestream)
+            else:
+                msg = "Failed to encode the supplied 'Attribute List' dataset"
+                LOGGER.error(msg)
+                raise ValueError(msg)
 
         # Send N-CREATE request to the peer via DIMSE and wait for the response
+        LOGGER.info('Sending Create Request: MsgID {}'.format(msg_id))
+
+        # Pause the reactor to prevent a race condition
+        self._reactor_checkpoint.clear()
+
         self.dimse.send_msg(req, context.context_id)
         cx_id, rsp = self.dimse.get_msg(block=True)
+
+        # Unpause the reactor
+        self._reactor_checkpoint.set()
 
         # If `rsp` is None then the DIMSE timeout expired so abort
         if rsp is None:
@@ -2228,34 +2191,49 @@ class Association(threading.Thread):
             if category not in [STATUS_WARNING, STATUS_SUCCESS]:
                 return status, attribute_list
 
-            # Attempt to decode the response's dataset
-            # pylint: disable=broad-except
-            try:
-                attribute_list = decode(rsp.AttributeList,
-                                        transfer_syntax.is_implicit_VR,
-                                        transfer_syntax.is_little_endian)
-            except Exception as ex:
-                LOGGER.error("Failed to decode the received dataset")
-                LOGGER.exception(ex)
-                # Failure: Processing failure
-                status.Status = 0x0110
+            bytestream = rsp.AttributeList
+            if bytestream and bytestream.getvalue() != b'':
+                # Attempt to decode the response's dataset
+                # pylint: disable=broad-except
+                try:
+                    attribute_list = decode(bytestream,
+                                            transfer_syntax.is_implicit_VR,
+                                            transfer_syntax.is_little_endian)
+                except Exception as ex:
+                    LOGGER.error(
+                        "Unable to decode the received 'Attribute List' "
+                        "dataset"
+                    )
+                    LOGGER.exception(ex)
+                    # Failure: Processing failure
+                    status.Status = 0x0110
+
+            else:
+                attribute_list = Dataset()
 
         return status, attribute_list
 
-    def send_n_delete(self, class_uid, instance_uid, msg_id=1):
+    def send_n_delete(self, class_uid, instance_uid, msg_id=1, meta_uid=None):
         """Send an N-DELETE request message to the peer AE.
 
         Parameters
         ----------
         class_uid : pydicom.uid.UID
-            The UID to be sent in the request's (0000,0003) *Requested SOP
-            Class UID* element.
+            The UID to be sent for the request's (0000,0003) *Requested SOP
+            Class UID* parameter.
         instance_uid : pydicom.uid.UID
-            The UID to be sent in the request's (0000,1001) *Requested SOP
-            Instance UID* element.
+            The UID to be sent for the request's (0000,1001) *Requested SOP
+            Instance UID* parameter.
         msg_id : int, optional
-            The DIMSE *Message ID*, must be between 0 and 65535, inclusive,
-            (default 1).
+            The request's *Message ID* parameter value, must be between 0 and
+            65535, inclusive, (default 1).
+        meta_uid : pydicom.uid.UID, optional
+            If the service class operates under a presentation context
+            negotiated using a *Meta SOP Class* rather than a standard *SOP
+            Class* (such as with *Print Management* service class and its
+            *Basic Grayscale Print Management Meta SOP Class*) then this
+            value will be used to determine the corresponding presentation
+            context.
 
         Returns
         -------
@@ -2271,23 +2249,22 @@ class Association(threading.Thread):
             Annex C)
 
             Success
-              | ``0x0000`` Successful operation
+              | ``0x0000`` - Successful operation
 
             Failure
-              | ``0x0110`` Processing failure
-              | ``0x0112`` No such SOP Instance
-              | ``0x0117`` Invalid object instance
-              | ``0x0118`` No such SOP Class
-              | ``0x0119`` Class-Instance conflict
-              | ``0x0124`` Not authorised
-              | ``0x0210`` Duplicate invocation
-              | ``0x0211`` Unrecognised operation
-              | ``0x0212`` Mistyped argument
-              | ``0x0213`` Resource limitation
+              | ``0x0110`` - Processing failure
+              | ``0x0112`` - No such SOP Instance
+              | ``0x0117`` - Invalid object instance
+              | ``0x0118`` - No such SOP Class
+              | ``0x0119`` - Class-Instance conflict
+              | ``0x0124`` - Not authorised
+              | ``0x0210`` - Duplicate invocation
+              | ``0x0211`` - Unrecognised operation
+              | ``0x0212`` - Mistyped argument
+              | ``0x0213`` - Resource limitation
 
         See Also
         --------
-        ae.ApplicationEntity.on_n_delete
         dimse_primitives.N_DELETE
 
         References
@@ -2309,7 +2286,7 @@ class Association(threading.Thread):
 
         # Determine the Presentation Context we are operating under
         #   and hence the transfer syntax to use for encoding `dataset`
-        context = self._get_valid_context(class_uid, '', 'scu')
+        context = self._get_valid_context(meta_uid or class_uid, '', 'scu')
 
         # Build N-DELETE request primitive
         #   (M) Message ID
@@ -2321,8 +2298,16 @@ class Association(threading.Thread):
         req.RequestedSOPInstanceUID = instance_uid
 
         # Send N-DELETE request to the peer via DIMSE and wait for the response
+        LOGGER.info('Sending Delete Request: MsgID {}'.format(msg_id))
+
+        # Pause the reactor to prevent a race condition
+        self._reactor_checkpoint.clear()
+
         self.dimse.send_msg(req, context.context_id)
         cx_id, rsp = self.dimse.get_msg(block=True)
+
+        # Unpause the reactor
+        self._reactor_checkpoint.set()
 
         # If `rsp` is None then the DIMSE timeout expired so abort
         if rsp is None:
@@ -2337,26 +2322,34 @@ class Association(threading.Thread):
         return status
 
     def send_n_event_report(self, dataset, event_type, class_uid,
-                            instance_uid, msg_id=1):
+                            instance_uid, msg_id=1, meta_uid=None):
         """Send an N-EVENT-REPORT request message to the peer AE.
 
         Parameters
         ----------
-        dataset : pydicom.dataset.Dataset
+        dataset : pydicom.dataset.Dataset or None
             The dataset that will be sent as the *Event Information* parameter
-            in the N-EVENT-REPORT request.
+            in the N-EVENT-REPORT request, if no *Event Information* parameter
+            is needed then ``None``.
         event_type : int
-            The value to be sent in the request's (0000,10002) *Event Type ID*
-            element.
+            The value to be sent for the request's (0000,1002) *Event Type ID*
+            parameter.
         class_uid : pydicom.uid.UID
-            The UID to be sent in the request's (0000,0003) *Affected SOP
-            Class UID* element.
+            The UID to be sent for the request's (0000,0003) *Affected SOP
+            Class UID* parameter.
         instance_uid : pydicom.uid.UID
-            The UID to be sent in the request's (0000,1001) *Affected SOP
-            Instance UID* element.
+            The UID to be sent for the request's (0000,1000) *Affected SOP
+            Instance UID* parameter.
         msg_id : int, optional
-            The DIMSE *Message ID*, must be between 0 and 65535, inclusive,
-            (default 1).
+            The request's *Message ID* parameter value, must be between 0 and
+            65535, inclusive, (default 1).
+        meta_uid : pydicom.uid.UID, optional
+            If the service class operates under a presentation context
+            negotiated using a *Meta SOP Class* rather than a standard *SOP
+            Class* (such as with *Print Management* service class and its
+            *Basic Grayscale Print Management Meta SOP Class*) then this
+            value will be used to determine the corresponding presentation
+            context.
 
         Returns
         -------
@@ -2368,33 +2361,37 @@ class Association(threading.Thread):
             optionally contain additional elements (see the DICOM Standard,
             Part 7, Section 9.1.2.1.5 and Annex C).
 
-            General N-EVENT-REPORT (DICOM Standard Part 7, Section 10.1.1
+            *General N-EVENT-REPORT* (DICOM Standard Part 7, Section 10.1.1
             and Annex C)
 
             Success
-              | ``0x0000`` Successful operation
+              | ``0x0000`` - Successful operation
 
             Failure
-              | ``0x0110`` Processing failure
-              | ``0x0112`` No such SOP Instance
-              | ``0x0113`` No such event type
-              | ``0x0114`` No such argument
-              | ``0x0115`` Invalid argument value
-              | ``0x0117`` Invalid object instance
-              | ``0x0118`` No such SOP Class
-              | ``0x0119`` Class-Instance conflict
-              | ``0x0210`` Duplicate invocation
-              | ``0x0211`` Unrecognised operation
-              | ``0x0212`` Mistyped argument
-              | ``0x0213`` Resource limitation
+              | ``0x0110`` - Processing failure
+              | ``0x0112`` - No such SOP Instance
+              | ``0x0113`` - No such event type
+              | ``0x0114`` - No such argument
+              | ``0x0115`` - Invalid argument value
+              | ``0x0117`` - Invalid object instance
+              | ``0x0118`` - No such SOP Class
+              | ``0x0119`` - Class-Instance conflict
+              | ``0x0210`` - Duplicate invocation
+              | ``0x0211`` - Unrecognised operation
+              | ``0x0212`` - Mistyped argument
+              | ``0x0213`` - Resource limitation
 
         event_reply : pydicom.dataset.Dataset or None
-            If the status is 'Success' then a ``Dataset`` containing the
-            optional reply to the event report.
+            If the status category is 'Success' or 'Warning' then a ``Dataset``
+            containing attributes corresponding to those supplied in the
+            *Event Reply*. Because *Event Reply* is optional the returned
+            ``Dataset`` may be empty.
+
+            If the status category is 'Failure' or if the peer timed-out,
+            aborted, or sent an invalid response then returns ``None``.
 
         See Also
         --------
-        ae.ApplicationEntity.on_n_event_report
         dimse_primitives.N_EVENT_REPORT
 
         References
@@ -2419,8 +2416,11 @@ class Association(threading.Thread):
 
         # Determine the Presentation Context we are operating under
         #   and hence the transfer syntax to use for encoding `dataset`
-        transfer_syntax = None
-        context = self._get_valid_context(class_uid, '', 'scu')
+        # As far as I can tell, N-EVENT-REPORT doesn't use SCP/SCU Role
+        #   selection negotiation, so we need to ignore the negotiate role
+        #   since the SCP will be sending requests to the SCU
+        context = self._get_valid_context(meta_uid or class_uid, '', None)
+        transfer_syntax = context.transfer_syntax[0]
 
         # Build N-EVENT-REPORT request primitive
         #   (M) Message ID
@@ -2434,23 +2434,35 @@ class Association(threading.Thread):
         req.AffectedSOPInstanceUID = instance_uid
         req.EventTypeID = event_type
 
-        # Encode the `dataset` using the agreed transfer syntax
-        #   Will return None if failed to encode
-        transfer_syntax = context.transfer_syntax[0]
-        bytestream = encode(dataset,
-                            transfer_syntax.is_implicit_VR,
-                            transfer_syntax.is_little_endian)
+        # *Event Information* is optional
+        if dataset is not None:
+            # Encode the `dataset` using the agreed transfer syntax
+            #   Will return None if failed to encode
+            bytestream = encode(dataset,
+                                transfer_syntax.is_implicit_VR,
+                                transfer_syntax.is_little_endian)
 
-        if bytestream is not None:
-            req.EventInformation = BytesIO(bytestream)
-        else:
-            LOGGER.error("Failed to encode the supplied dataset")
-            raise ValueError('Failed to encode the supplied dataset')
+            if bytestream is not None:
+                req.EventInformation = BytesIO(bytestream)
+            else:
+                msg = (
+                    "Unable to encode the supplied 'Event Information' dataset"
+                )
+                LOGGER.error(msg)
+                raise ValueError(msg)
 
         # Send N-EVENT-REPORT request to the peer via DIMSE and wait for
         # the response primitive
+        LOGGER.info('Sending Event Report Request: MsgID {}'.format(msg_id))
+
+        # Pause the reactor to prevent a race condition
+        self._reactor_checkpoint.clear()
+
         self.dimse.send_msg(req, context.context_id)
         cx_id, rsp = self.dimse.get_msg(block=True)
+
+        # Unpause the reactor
+        self._reactor_checkpoint.set()
 
         # If `rsp` is None then the DIMSE timeout expired so abort
         if rsp is None:
@@ -2470,39 +2482,54 @@ class Association(threading.Thread):
             if category not in [STATUS_WARNING, STATUS_SUCCESS]:
                 return status, event_reply
 
-            # Attempt to decode the response's dataset
-            # pylint: disable=broad-except
-            try:
-                event_reply = decode(rsp.EventReply,
-                                     transfer_syntax.is_implicit_VR,
-                                     transfer_syntax.is_little_endian)
-            except Exception as ex:
-                LOGGER.error("Failed to decode the received dataset")
-                LOGGER.exception(ex)
-                # Failure: Processing failure
-                status.Status = 0x0110
+            bytestream = rsp.EventReply
+            if bytestream and bytestream.getvalue() != b'':
+                # Attempt to decode the response's dataset
+                # pylint: disable=broad-except
+                try:
+                    event_reply = decode(bytestream,
+                                         transfer_syntax.is_implicit_VR,
+                                         transfer_syntax.is_little_endian)
+                except Exception as ex:
+                    LOGGER.error(
+                        "Unable to decode the received 'Event Reply' dataset"
+                    )
+                    LOGGER.exception(ex)
+                    # Failure: Processing failure
+                    status.Status = 0x0110
+
+            else:
+                event_reply = Dataset()
 
         return status, event_reply
 
-    def send_n_get(self, identifier_list, class_uid, instance_uid, msg_id=1):
+    def send_n_get(self, identifier_list, class_uid, instance_uid, msg_id=1,
+                   meta_uid=None):
         """Send an N-GET request message to the peer AE.
 
         Parameters
         ----------
         identifier_list : list of pydicom.tag.Tag
-            A list of DICOM Data Element tags to be sent in the request's
-            (0000,1005) *Attribute Identifier List* element. Should either be
-            a list of pydicom Tag objects or a list of values that is
-            acceptable for creating pydicom Tag objects.
+            A list of DICOM Data Element tags to be sent for the request's
+            (0000,1005) *Attribute Identifier List* parameter. Should either be
+            a list of pydicom ``Tag`` objects or a list of values that is
+            acceptable for creating pydicom ``Tag`` objects.
         class_uid : pydicom.uid.UID
-            The UID to be sent in the request's (0000,0003) *Requested SOP
-            Class UID* element.
+            The UID to be sent for the request's (0000,0003) *Requested SOP
+            Class UID* parameter.
         instance_uid : pydicom.uid.UID
-            The UID to be sent in the request's (0000,1001) *Requested SOP
-            Instance UID* element.
+            The UID to be sent for the request's (0000,1001) *Requested SOP
+            Instance UID* parameter.
         msg_id : int, optional
-            The DIMSE *Message ID*, must be between 0 and 65535, inclusive,
-            (default 1).
+            The request's *Message ID* parameter value, must be between 0 and
+            65535, inclusive, (default 1).
+        meta_uid : pydicom.uid.UID, optional
+            If the service class operates under a presentation context
+            negotiated using a *Meta SOP Class* rather than a standard *SOP
+            Class* (such as with *Print Management* service class and its
+            *Basic Grayscale Print Management Meta SOP Class*) then this
+            value will be used to determine the corresponding presentation
+            context.
 
         Returns
         -------
@@ -2514,35 +2541,61 @@ class Association(threading.Thread):
             optionally contain additional elements (see the DICOM Standard,
             Part 7, Section 9.1.2.1.5 and Annex C).
 
-            General N-GET (DICOM Standard Part 7, Section 10.1.2 and Annex C)
+            *General N-GET* (DICOM Standard Part 7, Section 10.1.2 and Annex C)
 
             Success
-              | ``0x0000`` Successful operation
+              | ``0x0000`` - Successful operation
 
             Warning
-              | ``0x0107`` Attribute list error
+              | ``0x0107`` - Attribute list error
 
             Failure
-              | ``0x0110`` Processing failure
-              | ``0x0112`` No such SOP Instance
-              | ``0x0117`` Invalid object instance
-              | ``0x0118`` No such SOP Class
-              | ``0x0119`` Class-Instance conflict
-              | ``0x0122`` SOP class not supported
-              | ``0x0124`` Not authorised
-              | ``0x0210`` Duplicate invocation
-              | ``0x0211`` Unrecognised operation
-              | ``0x0212`` Mistyped argument
-              | ``0x0213`` Resource limitation
+              | ``0x0110`` - Processing failure
+              | ``0x0112`` - No such SOP Instance
+              | ``0x0117`` - Invalid object instance
+              | ``0x0118`` - No such SOP Class
+              | ``0x0119`` - Class-Instance conflict
+              | ``0x0122`` - SOP class not supported
+              | ``0x0124`` - Not authorised
+              | ``0x0210`` - Duplicate invocation
+              | ``0x0211`` - Unrecognised operation
+              | ``0x0212`` - Mistyped argument
+              | ``0x0213`` - Resource limitation
+
+            *Modality Performed Procedure Step Management Service* and *Media
+            Creation Management Service* specific
+            (DICOM Standard Part 4, Annex F.8.2.1.4 and Annex S.3.2.4.4):
+
+            Warning
+              | ``0x0001`` - Requested optional Attributes are not supported
+
+            *Unified Procedure Step Service* specific
+            (DICOM Standard Part 4, Annex CC.2.7.4):
+
+            Warning
+              | ``0x0001`` - Requested optional Attributes are not supported
+
+            Failure
+              | ``0xC307`` - Specified SOP Instance UID doesn't exist or is not
+                a UPS Instance managed by this SCP
+
+            *RT Machine Verification Service* specific
+            (DICOM Standard Part 4, Annex DD.3.2.2.3):
+
+            Failure
+              | ``0xC112`` - Applicable Machine Verification Instance not found
 
         attribute_list : pydicom.dataset.Dataset or None
-            If the status is 'Success' then a ``Dataset`` containing attributes
-            corresponding to those supplied in the *Attribute Identifier List*,
-            otherwise returns None.
+            If the status category is 'Success' or 'Warning' then a ``Dataset``
+            containing attributes corresponding to those supplied in the
+            *Attribute List*. Because *Attribute List* is optional the returned
+            ``Dataset`` may be empty.
+
+            If the status category is 'Failure' or if the peer timed-out,
+            aborted, or sent an invalid response then returns ``None``.
 
         See Also
         --------
-        ae.ApplicationEntity.on_n_get
         dimse_primitives.N_GET
         service_class.DisplaySystemManagementServiceClass
 
@@ -2569,7 +2622,7 @@ class Association(threading.Thread):
 
         # Determine the Presentation Context we are operating under
         #   and hence the transfer syntax to use for encoding `dataset`
-        context = self._get_valid_context(class_uid, '', 'scu')
+        context = self._get_valid_context(meta_uid or class_uid, '', 'scu')
         transfer_syntax = context.transfer_syntax[0]
 
         # Build N-GET request primitive
@@ -2584,8 +2637,16 @@ class Association(threading.Thread):
         req.AttributeIdentifierList = identifier_list
 
         # Send N-GET request to the peer via DIMSE and wait for the response
+        LOGGER.info('Sending Get Request: MsgID {}'.format(msg_id))
+
+        # Pause the reactor to prevent a race condition
+        self._reactor_checkpoint.clear()
+
         self.dimse.send_msg(req, context.context_id)
         cx_id, rsp = self.dimse.get_msg(block=True)
+
+        # Unpause the reactor
+        self._reactor_checkpoint.set()
 
         # If `rsp` is None then the DIMSE timeout expired so abort
         if rsp is None:
@@ -2605,21 +2666,30 @@ class Association(threading.Thread):
             if category not in [STATUS_WARNING, STATUS_SUCCESS]:
                 return status, attribute_list
 
-            # Attempt to decode the response's dataset
-            # pylint: disable=broad-except
-            try:
-                attribute_list = decode(rsp.AttributeList,
-                                        transfer_syntax.is_implicit_VR,
-                                        transfer_syntax.is_little_endian)
-            except Exception as ex:
-                LOGGER.error("Failed to decode the received dataset")
-                LOGGER.exception(ex)
-                # Failure: Processing failure
-                status.Status = 0x0110
+            bytestream = rsp.AttributeList
+            if bytestream and bytestream.getvalue() != b'':
+                # Attempt to decode the response's dataset
+                # pylint: disable=broad-except
+                try:
+                    attribute_list = decode(bytestream,
+                                            transfer_syntax.is_implicit_VR,
+                                            transfer_syntax.is_little_endian)
+                except Exception as ex:
+                    LOGGER.error(
+                        "Unable to decode the received 'Attribute List' "
+                        "dataset"
+                    )
+                    LOGGER.exception(ex)
+                    # Failure: Processing failure
+                    status.Status = 0x0110
+
+            else:
+                attribute_list = Dataset()
 
         return status, attribute_list
 
-    def send_n_set(self, dataset, class_uid, instance_uid, msg_id=1):
+    def send_n_set(self, dataset, class_uid, instance_uid, msg_id=1,
+                   meta_uid=None):
         """Send an N-SET request message to the peer AE.
 
         Parameters
@@ -2628,14 +2698,21 @@ class Association(threading.Thread):
             The dataset that will be sent as the *Modification List* parameter
             in the N-SET request.
         class_uid : pydicom.uid.UID
-            The UID to be sent in the request's (0000,0003) *Requested SOP
-            Class UID* element.
+            The UID to be sent for the request's (0000,0003) *Requested SOP
+            Class UID* parameter.
         instance_uid : pydicom.uid.UID
-            The UID to be sent in the request's (0000,1001) *Requested SOP
-            Instance UID* element.
+            The UID to be sent for the request's (0000,1001) *Requested SOP
+            Instance UID* parameter.
         msg_id : int, optional
-            The DIMSE *Message ID*, must be between 0 and 65535, inclusive,
-            (default 1).
+            The request's *Message ID* parameter value, must be between 0 and
+            65535, inclusive, (default 1).
+        meta_uid : pydicom.uid.UID, optional
+            If the service class operates under a presentation context
+            negotiated using a *Meta SOP Class* rather than a standard *SOP
+            Class* (such as with *Print Management* service class and its
+            *Basic Grayscale Print Management Meta SOP Class*) then this
+            value will be used to determine the corresponding presentation
+            context.
 
         Returns
         -------
@@ -2647,39 +2724,93 @@ class Association(threading.Thread):
             optionally contain additional elements (see the DICOM Standard,
             Part 7, Section 9.1.2.1.5 and Annex C).
 
-            General N-SET (DICOM Standard Part 7, Section 10.1.3 and Annex C)
+            *General N-SET* (DICOM Standard Part 7, Section 10.1.3 and Annex C)
 
             Success
-              | ``0x0000`` Successful operation
+              | ``0x0000`` - Successful operation
 
             Warning
-              | ``0x0107`` Attribute list error
-              | ``0x0116`` Attribute value out of range
+              | ``0x0107`` - Attribute list error
+              | ``0x0116`` - Attribute value out of range
 
             Failure
-              | ``0x0105`` No such attribute
-              | ``0x0106`` Invalid attribute value
-              | ``0x0110`` Processing failure
-              | ``0x0112`` No such SOP Instance
-              | ``0x0117`` Invalid object instance
-              | ``0x0118`` No such SOP Class
-              | ``0x0119`` Class-Instance conflict
-              | ``0x0121`` Missing attribute value
-              | ``0x0122`` SOP class not supported
-              | ``0x0124`` Not authorised
-              | ``0x0210`` Duplicate invocation
-              | ``0x0211`` Unrecognised operation
-              | ``0x0212`` Mistyped argument
-              | ``0x0213`` Resource limitation
+              | ``0x0105`` - No such attribute
+              | ``0x0106`` - Invalid attribute value
+              | ``0x0110`` - Processing failure
+              | ``0x0112`` - No such SOP Instance
+              | ``0x0117`` - Invalid object instance
+              | ``0x0118`` - No such SOP Class
+              | ``0x0119`` - Class-Instance conflict
+              | ``0x0121`` - Missing attribute value
+              | ``0x0122`` - SOP class not supported
+              | ``0x0124`` - Not authorised
+              | ``0x0210`` - Duplicate invocation
+              | ``0x0211`` - Unrecognised operation
+              | ``0x0212`` - Mistyped argument
+              | ``0x0213`` - Resource limitation
+
+            *Print Management Service* specific (DICOM
+            Standard Part 4, Annex H.4.1.2.1.2, H.4.2.2.1.2, H.4.3.1.2.1.2 and
+            H.4.3.2.2.1.2):
+
+            Warning
+              | ``0xB600`` - Memory allocation not supported
+              | ``0xB604`` - Image size larger than image box size, the image
+                has been demagnified
+              | ``0xB605`` - Requested Min Density or Max Density outside of
+                printer's operating range. The printer will use its respective
+                minimum or maximum density value instead
+              | ``0xB609`` - Image size is larger than the Image Box. The Image
+                has been cropped to fit
+              | ``0xB60A`` - Image size or Combined Print Image size is larger
+                than the Image Box size. The Image or Combined Print Image has
+                been decimated to fit
+
+            Failure
+              | ``0xC603`` - Image size is larger than image box size
+              | ``0xC605`` - Insufficient memory in printer to store the image
+              | ``0xC613`` - Combined Print Image size is larger than the Image
+                Box size
+              | ``0xC616`` - There is an existing Film Box that has not been
+                printed and N-ACTION at the Film Session level is not
+                supported. A new Film Box will not be created when a previous
+                Film Box has not been printed
+
+            *Unified Procedure Step Service* specific (DICOM Standard Part 4,
+            Annex CC.2.6.4):
+
+            Warning
+              | ``0x0001`` - Requested optional attributes are not supported
+              | ``0xB305`` - Coerced invalid values to valid values
+
+            Failure
+              | ``0xC300`` - The UPS may no longer be updated
+              | ``0xC301`` - The correct Transaction UID was not provided
+              | ``0xC307`` - Specified SOP Instance UID does not exist or is
+                not a UPS Instance managed by this SCP
+              | ``0xC310`` - The UPS is not in the 'IN PROGRESS' state
+
+            *RT Machine Verification Service* specific (DICOM Standard Part 4,
+            Annex DD.3.2.1.2):
+
+            Failure
+              | ``0xC224`` - Reference Beam Number not found within the
+                referenced Fraction Group
+              | ``0xC225`` - Referenced device or accessory not supported
+              | ``0xC226`` - Referenced device or accessory not found with the
+                referenced beam
 
         attribute_list : pydicom.dataset.Dataset or None
-            If the status is 'Success' then a ``Dataset`` containing attributes
-            corresponding to those supplied in the *Attribute List*,
-            otherwise returns None.
+            If the status category is 'Success' or 'Warning' then a ``Dataset``
+            containing attributes corresponding to those supplied in the
+            *Attribute List*. Because *Attribute List* is optional the returned
+            ``Dataset`` may be empty.
+
+            If the status category is 'Failure' or if the peer timed-out,
+            aborted, or sent an invalid response then returns ``None``.
 
         See Also
         --------
-        ae.ApplicationEntity.on_n_set
         dimse_primitives.N_SET
 
         References
@@ -2703,7 +2834,7 @@ class Association(threading.Thread):
 
         # Determine the Presentation Context we are operating under
         #   and hence the transfer syntax to use for encoding `dataset`
-        context = self._get_valid_context(class_uid, '', 'scu')
+        context = self._get_valid_context(meta_uid or class_uid, '', 'scu')
         transfer_syntax = context.transfer_syntax[0]
 
         # Build N-SET request primitive
@@ -2725,12 +2856,21 @@ class Association(threading.Thread):
         if bytestream is not None:
             req.ModificationList = BytesIO(bytestream)
         else:
-            LOGGER.error("Failed to encode the supplied Dataset")
-            raise ValueError('Failed to encode the supplied Dataset')
+            msg = "Failed to encode the supplied 'Modification List' dataset"
+            LOGGER.error(msg)
+            raise ValueError(msg)
 
         # Send N-SET request to the peer via DIMSE and wait for the response
+        LOGGER.info('Sending Set Request: MsgID {}'.format(msg_id))
+
+        # Pause the reactor to prevent a race condition
+        self._reactor_checkpoint.clear()
+
         self.dimse.send_msg(req, context.context_id)
         cx_id, rsp = self.dimse.get_msg(block=True)
+
+        # Unpause the reactor
+        self._reactor_checkpoint.set()
 
         # If `rsp` is None then the DIMSE timeout expired so abort
         if rsp is None:
@@ -2750,122 +2890,106 @@ class Association(threading.Thread):
             if category not in [STATUS_WARNING, STATUS_SUCCESS]:
                 return status, attribute_list
 
-            # Attempt to decode the response's dataset
-            # pylint: disable=broad-except
-            try:
-                attribute_list = decode(rsp.AttributeList,
-                                        transfer_syntax.is_implicit_VR,
-                                        transfer_syntax.is_little_endian)
-            except Exception as ex:
-                LOGGER.error("Failed to decode the received dataset")
-                LOGGER.exception(ex)
-                # Failure: Processing failure
-                status.Status = 0x0110
+            bytestream = rsp.AttributeList
+            if bytestream and bytestream.getvalue() != b'':
+                # Attempt to decode the response's dataset
+                # pylint: disable=broad-except
+                try:
+                    attribute_list = decode(rsp.AttributeList,
+                                            transfer_syntax.is_implicit_VR,
+                                            transfer_syntax.is_little_endian)
+                except Exception as ex:
+                    LOGGER.error(
+                        "Unable to decode the received 'Attribute List' "
+                        "dataset"
+                    )
+                    LOGGER.exception(ex)
+                    # Failure: Processing failure
+                    status.Status = 0x0110
+
+            else:
+                attribute_list = Dataset()
 
         return status, attribute_list
 
-    # Association logging/debugging functions
-    @staticmethod
-    def debug_association_aborted(primitive=None):
-        """Debugging information when an A-ABORT request received.
+    def _serve_request(self, msg, context_id):
+        """Handle a DIMSE service request.
 
         Parameters
         ----------
-        assoc_primitive : pynetdicom.pdu_primitives.A_ABORT
-            The A-ABORT (RQ) primitive received from the DICOM Upper Layer
+        msg : dimse_primitives.DIMSEPrimitive subclass
+            The DIMSE service request primitive.
+        context_id : int
+            The ID of the presentation context that the request is being
+            made under.
         """
-        LOGGER.error('Association Aborted')
+        # No message or not a service request
+        if not msg.is_valid_request:
+            LOGGER.warning(
+                "Received unexpected {} service message".format(msg.msg_type)
+            )
+            return
 
-    @staticmethod
-    def debug_association_accepted(primitive):
-        """Debugging information when an A-ASSOCIATE accept is received.
+        # Use the Message's Affected SOP Class UID or Requested SOP
+        #   Class UID to determine which service to use
+        class_uid = ''
+        if getattr(msg, 'AffectedSOPClassUID', None) is not None:
+            # DIMSE-C, N-EVENT-REPORT, N-CREATE use AffectedSOPClassUID
+            class_uid = msg.AffectedSOPClassUID
+        elif getattr(msg, 'RequestedSOPClassUID', None) is not None:
+            # N-GET, N-SET, N-ACTION, N-DELETE use RequestedSOPClassUID
+            class_uid = msg.RequestedSOPClassUID
 
-        Parameters
-        ----------
-        primitive : pynetdicom.pdu_primitives.A_ASSOCIATE
-            The A-ASSOCIATE (AC) PDU received from the DICOM Upper Layer
-        """
-        pass
+        # SOP Class Common Extended Negotiation
+        try:
+            # The service class UID
+            class_uid = self.acceptor.accepted_common_extended[class_uid][0]
+        except KeyError:
+            pass
 
-    @staticmethod
-    def debug_association_rejected(primitive):
-        """Debugging information when an A-ASSOCIATE rejection received.
+        # Convert the SOP/Service UID to the corresponding service
+        service_class = uid_to_service_class(class_uid)(self)
 
-        Parameters
-        ----------
-        assoc_primitive : pynetdicom.pdu_primitives.A_ASSOCIATE
-            The A-ASSOCIATE (RJ) primitive received from the DICOM Upper Layer
-        """
-        # See PS3.8 Section 7.1.1.9 but mainly Section 9.3.4 and Table 9-21
-        #   for information on the result and diagnostic information
-        source = primitive.result_source
-        result = primitive.result
-        reason = primitive.diagnostic
+        try:
+            context = self._accepted_cx[context_id]
+        except KeyError:
+            LOGGER.info(
+                "Received DIMSE message with invalid or rejected "
+                "context ID: %d", context_id
+            )
+            LOGGER.debug("%s", msg)
+            self.abort()
+            return
 
-        source_str = {1 : 'Service User',
-                      2 : 'Service Provider (ACSE)',
-                      3 : 'Service Provider (Presentation)'}
-
-        reason_str = [{1 : 'No reason given',
-                       2 : 'Application context name not supported',
-                       3 : 'Calling AE title not recognised',
-                       4 : 'Reserved',
-                       5 : 'Reserved',
-                       6 : 'Reserved',
-                       7 : 'Called AE title not recognised',
-                       8 : 'Reserved',
-                       9 : 'Reserved',
-                       10 : 'Reserved'},
-                      {1 : 'No reason given',
-                       2 : 'Protocol version not supported'},
-                      {0 : 'Reserved',
-                       1 : 'Temporary congestion',
-                       2 : 'Local limit exceeded',
-                       3 : 'Reserved',
-                       4 : 'Reserved',
-                       5 : 'Reserved',
-                       6 : 'Reserved',
-                       7 : 'Reserved'}]
-
-        result_str = {1 : 'Rejected Permanent',
-                      2 : 'Rejected Transient'}
-
-        LOGGER.error('Association Rejected:')
-        LOGGER.error('Result: %s, Source: %s', result_str[result],
-                     source_str[source])
-        LOGGER.error('Reason: %s', reason_str[source - 1][reason])
-
-    @staticmethod
-    def debug_association_released(primitive=None):
-        """Debugging information when an A-RELEASE request received.
-
-        Parameters
-        ----------
-        assoc_primitive : pynetdicom.pdu_primitives.A_RELEASE
-            The A-RELEASE (RQ) primitive received from the DICOM Upper Layer
-        """
-        LOGGER.info('Association Released')
-
-    @staticmethod
-    def debug_association_requested(primitive):
-        """Debugging information when an A-ASSOCIATE request received.
-
-        Parameters
-        ----------
-        primitive : pynetdicom.pdu_primitives.A_ASSOCIATE
-            The A-ASSOCIATE (RQ) PDU received from the DICOM Upper Layer
-        """
-        pass
+        # Run corresponding Service Class in SCP mode
+        try:
+            # Clear out any C-CANCEL requests received beforehand
+            self.dimse.cancel_req = {}
+            service_class.SCP(msg, context)
+            # Clear out any unacted upon requests received during
+            self.dimse.cancel_req = {}
+        except NotImplementedError:
+            # SCP isn't implemented
+            LOGGER.error(
+                "No supported service class available for the SOP "
+                "Class UID '{}'".format(class_uid)
+            )
+            self.abort()
+            return
+        except Exception as exc:
+            LOGGER.exception(exc)
+            self.abort()
+            return
 
 
 class ServiceUser(object):
-    """Convenience class for the Association Service User.
+    """Convenience class for the ``Association`` service user.
 
-    An Association object has two ServiceUser attributes, one representing the
-    association requestor and the other the association acceptor. Once both
-    ServiceUser's have been defined sufficiently to be considered valid then
-    association negotiation can begin. The requestor ServiceUser requires
-    (at a minimum) the following in order to be valid:
+    An ``Association`` object has two ``ServiceUser`` attributes, one
+    representing the association *Requestor* and the other the association
+    *Acceptor*. Once both have been defined sufficiently to be considered
+    valid then association negotiation can begin. The *Requestor*
+    ``ServiceUser`` requires (at a minimum) the following in order to be valid:
 
     * For association as requestor:
 
@@ -2879,8 +3003,8 @@ class ServiceUser(object):
         * AE title
         * Address and port number
 
-    The acceptor ServiceUser requires (at a minimum) the following in order
-    to be valid:
+    The *Acceptor* ``ServiceUser`` requires (at a minimum) the following in
+    order to be valid:
 
     * For association as requestor:
 

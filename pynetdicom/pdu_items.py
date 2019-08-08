@@ -47,6 +47,7 @@ from struct import Struct
 from pydicom.uid import UID
 
 from pynetdicom.presentation import PresentationContext
+from pynetdicom.utils import validate_uid
 
 
 LOGGER = logging.getLogger('pynetdicom.pdu_items')
@@ -124,7 +125,8 @@ class PDUItem(object):
         if other is self:
             return True
 
-        if isinstance(other, self.__class__):
+        if isinstance(other, type(self)):
+            # Use the values of the class attributes that get encoded
             self_dict = {
                 en[0]: getattr(self, en[0]) for en in self._encoders if en[0]
             }
@@ -215,11 +217,7 @@ class PDUItem(object):
     @property
     def item_type(self):
         """Return the item's *Item Type* field value as an int."""
-        key_val = PDU_ITEM_TYPES.items()
-        keys = [key for (key, val) in key_val]
-        vals = [val for (key, val) in key_val]
-
-        return keys[vals.index(self.__class__)]
+        return {vv: kk for kk, vv in PDU_ITEM_TYPES.items()}[type(self)]
 
     def __len__(self):
         """Return the total length of the encoded item as an int."""
@@ -445,8 +443,13 @@ class ApplicationContextItem(PDUItem):
         elif isinstance(value, bytes):
             value = UID(value.decode('ascii'))
         else:
-            raise TypeError('Application Context Name must be a UID, '
-                            'str or bytes')
+            raise TypeError(
+                'Application Context Name must be a UID, str or bytes'
+            )
+
+        if value is not None and not validate_uid(value):
+            LOGGER.error("Invalid 'Application Context Name'")
+            raise ValueError("Invalid 'Application Context Name'")
 
         self._application_context_name = value
 
@@ -853,9 +856,8 @@ class PresentationContextItemAC(PDUItem):
         primitive = PresentationContext()
         primitive.context_id = self.presentation_context_id
         primitive.result = self.result_reason
-        primitive.add_transfer_syntax(
-            self.transfer_syntax_sub_item[0].transfer_syntax_name
-        )
+        if self.transfer_syntax:
+            primitive.add_transfer_syntax(self.transfer_syntax)
 
         return primitive
 
@@ -945,8 +947,8 @@ class PresentationContextItemAC(PDUItem):
             0 : 'Accepted',
             1 : 'User Rejection',
             2 : 'Provider Rejection',
-            3 : 'Abstract Syntax Not Supported',
-            4 : 'Transfer Syntax Not Supported'
+            3 : 'Rejected - Abstract Syntax Not Supported',
+            4 : 'Rejected - Transfer Syntax Not Supported'
         }
         return _result[self.result_reason]
 
@@ -958,8 +960,9 @@ class PresentationContextItemAC(PDUItem):
         s += "  Context ID: {0:d}\n".format(self.presentation_context_id)
         s += "  Result/Reason: {0!s}\n".format(self.result_str)
 
-        item_str = '{0!s}'.format(self.transfer_syntax.name)
-        s += '  +  {0!s}\n'.format(item_str)
+        if self.transfer_syntax:
+            item_str = '{0!s}'.format(self.transfer_syntax.name)
+            s += '  +  {0!s}\n'.format(item_str)
 
         return s
 
@@ -970,11 +973,28 @@ class PresentationContextItemAC(PDUItem):
         Returns
         -------
         pydicom.uid.UID or None
+            If no Transfer Syntax Sub-item or an empty Transfer Syntax Sub-item
+            has been sent by the Acceptor then returns None, otherwise returns
+            the Transfer Syntax Sub-item's transfer syntax UID.
         """
         if self.transfer_syntax_sub_item:
             return self.transfer_syntax_sub_item[0].transfer_syntax_name
 
         return None
+
+    def _wrap_generate_items(self, bytestream):
+        """Return a list of decoded PDU items generated from `bytestream`."""
+        item_list = []
+        for item_type, item_bytes in self._generate_items(bytestream):
+            item = PDU_ITEM_TYPES[item_type]()
+            # Transfer Syntax items shall not have their value tested if
+            #   not accepted
+            if item_type == 0x40 and self.result != 0x00:
+                item._skip_validation = True
+            item.decode(item_bytes)
+            item_list.append(item)
+
+        return item_list
 
 
 class UserInformationItem(PDUItem):
@@ -1350,8 +1370,13 @@ class AbstractSyntaxSubItem(PDUItem):
         elif value is None:
             pass
         else:
-            raise TypeError('Abstract Syntax must be a pydicom.uid.UID, '
-                            'str or bytes')
+            raise TypeError(
+                'Abstract Syntax Name ust be a pydicom.uid.UID, str or bytes'
+            )
+
+        if value is not None and not validate_uid(value):
+            LOGGER.error("Abstract Syntax Name is an invalid UID")
+            raise ValueError("Abstract Syntax Name is an invalid UID")
 
         self._abstract_syntax_name = value
 
@@ -1484,6 +1509,8 @@ class TransferSyntaxSubItem(PDUItem):
 
     def __init__(self):
         """Initialise a new Abstract Syntax Item."""
+        # Should not be validated if Presentation Context was rejected
+        self._skip_validation = False
         self.transfer_syntax_name = None
 
     @property
@@ -1539,8 +1566,10 @@ class TransferSyntaxSubItem(PDUItem):
         s = "Transfer syntax sub item\n"
         s += "  Item type: 0x{0:02x}\n".format(self.item_type)
         s += "  Item length: {0:d} bytes\n".format(self.item_length)
-        s += '  Transfer syntax name: ={0!s}\n'.format(
-            self.transfer_syntax_name.name)
+        if self.transfer_syntax_name:
+            s += '  Transfer syntax name: ={0!s}\n'.format(
+                self.transfer_syntax_name.name
+            )
 
         return s
 
@@ -1576,7 +1605,15 @@ class TransferSyntaxSubItem(PDUItem):
             raise TypeError('Transfer syntax must be a pydicom.uid.UID, '
                             'bytes or str')
 
-        self._transfer_syntax_name = value
+        if self._skip_validation:
+            self._transfer_syntax_name = value or None
+            return
+
+        if value is not None and not validate_uid(value):
+            LOGGER.error("Transfer Syntax Name is an invalid UID")
+            raise ValueError("Transfer Syntax Name is an invalid UID")
+
+        self._transfer_syntax_name = value or None
 
 
 ## User Information Item sub-items
@@ -1869,9 +1906,11 @@ class ImplementationClassUIDSubItem(PDUItem):
             raise TypeError('implementation_class_uid must be str, bytes '
                             'or UID')
 
+        if value is not None and not validate_uid(value):
+            LOGGER.error("Implementation Class UID is an invalid UID")
+            raise ValueError("Implementation Class UID is an invalid UID")
+
         self._implementation_class_uid = value
-        #if value is not None:
-        #    #self.item_length = len(self.implementation_class_uid)
 
     @property
     def item_length(self):
@@ -2320,6 +2359,7 @@ class SCP_SCU_RoleSelectionSubItem(PDUItem):
             self.scu_role = int(primitive.scu_role)
         else:
             self.scu_role = False
+
         if primitive.scp_role is not None:
             self.scp_role = int(primitive.scp_role)
         else:
@@ -2473,6 +2513,10 @@ class SCP_SCU_RoleSelectionSubItem(PDUItem):
         else:
             raise TypeError('sop_class_uid must be str, bytes or '
                             'pydicom.uid.UID')
+
+        if value is not None and not validate_uid(value):
+            LOGGER.error("SOP Class UID is an invalid UID")
+            raise ValueError("SOP Class UID is an invalid UID")
 
         self._sop_class_uid = value
 
@@ -2699,6 +2743,10 @@ class SOPClassExtendedNegotiationSubItem(PDUItem):
         else:
             raise TypeError('sop_class_uid must be str, bytes or '
                             'pydicom.uid.UID')
+
+        if value is not None and not validate_uid(value):
+            LOGGER.error("SOP Class UID is an invalid UID")
+            raise ValueError("SOP Class UID is an invalid UID")
 
         self._sop_class_uid = value
 
@@ -3045,6 +3093,14 @@ class SOPClassCommonExtendedNegotiationSubItem(PDUItem):
                 raise TypeError('related_general_sop_class_identification '
                                 'must be str, bytes or pydicom.uid.UID')
 
+            if value is not None and not validate_uid(value):
+                msg = (
+                    "Related General SOP Class Identification contains "
+                    "an invalid UID"
+                )
+                LOGGER.error(msg)
+                raise ValueError(msg)
+
             self._related_general_sop_class_identification.append(value)
 
     @property
@@ -3077,6 +3133,10 @@ class SOPClassCommonExtendedNegotiationSubItem(PDUItem):
             raise TypeError('sop_class_uid must be str, bytes or '
                             'pydicom.uid.UID')
 
+        if value is not None and not validate_uid(value):
+            LOGGER.error("SOP Class UID is an invalid UID")
+            raise ValueError("SOP Class UID is an invalid UID")
+
         self._sop_class_uid = value
 
     @property
@@ -3105,6 +3165,10 @@ class SOPClassCommonExtendedNegotiationSubItem(PDUItem):
         else:
             raise TypeError('service_class_uid must be str, bytes or '
                             'pydicom.uid.UID')
+
+        if value is not None and not validate_uid(value):
+            LOGGER.error("Service Class UID is an invalid UID")
+            raise ValueError("Service Class UID is an invalid UID")
 
         self._service_class_uid = value
 

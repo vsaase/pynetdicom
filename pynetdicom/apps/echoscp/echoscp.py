@@ -9,6 +9,7 @@ providing useful debugging and logging information.
 
 import argparse
 import logging
+from logging.config import fileConfig
 import os
 import socket
 import sys
@@ -17,17 +18,11 @@ from pydicom.uid import (
     ExplicitVRLittleEndian, ImplicitVRLittleEndian, ExplicitVRBigEndian
 )
 
-from pynetdicom import AE
+from pynetdicom import AE, evt
 from pynetdicom.sop_class import VerificationSOPClass
 
-LOGGER = logging.Logger('echoscp')
-stream_logger = logging.StreamHandler()
-formatter = logging.Formatter('%(levelname).1s: %(message)s')
-stream_logger.setFormatter(formatter)
-LOGGER.addHandler(stream_logger)
-LOGGER.setLevel(logging.ERROR)
 
-VERSION = '0.5.0'
+VERSION = '0.6.1'
 
 
 def _setup_argparser():
@@ -62,13 +57,13 @@ def _setup_argparser():
                           help="debug mode, print debug information",
                           action="store_true")
     gen_opts.add_argument("-ll", "--log-level", metavar='[l]',
-                          help="use level l for the LOGGER (fatal, error, warn, "
+                          help="use level l for the APP_LOGGER (fatal, error, warn, "
                                "info, debug, trace)",
                           type=str,
                           choices=['fatal', 'error', 'warn',
                                    'info', 'debug', 'trace'])
     gen_opts.add_argument("-lc", "--log-config", metavar='[f]',
-                          help="use config file f for the LOGGER",
+                          help="use config file f for the APP_LOGGER",
                           type=str)
 
     # Network Options
@@ -115,27 +110,39 @@ def _setup_argparser():
 args = _setup_argparser()
 
 # Logging/Output
+def setup_logger():
+    """Setup the echoscu logging"""
+    logger = logging.Logger('echoscp')
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('%(levelname).1s: %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    logger.setLevel(logging.ERROR)
+
+    return logger
+
+APP_LOGGER = setup_logger()
+
+def _setup_logging(level):
+    APP_LOGGER.setLevel(level)
+    lib_logger = logging.getLogger('pynetdicom')
+    handler = logging.StreamHandler()
+    lib_logger.setLevel(level)
+    formatter = logging.Formatter('%(levelname).1s: %(message)s')
+    handler.setFormatter(formatter)
+    lib_logger.addHandler(handler)
+
 if args.quiet:
-    for h in LOGGER.handlers:
-        LOGGER.removeHandler(h)
+    for hh in APP_LOGGER.handlers:
+        APP_LOGGER.removeHandler(hh)
 
-    LOGGER.addHandler(logging.NullHandler())
-
-    pynetdicom_logger = logging.getLogger('pynetdicom')
-    for h in pynetdicom_logger.handlers:
-        pynetdicom_logger.removeHandler(h)
-
-    pynetdicom_logger.addHandler(logging.NullHandler())
+    APP_LOGGER.addHandler(logging.NullHandler())
 
 if args.verbose:
-    LOGGER.setLevel(logging.INFO)
-    pynetdicom_logger = logging.getLogger('pynetdicom')
-    pynetdicom_logger.setLevel(logging.INFO)
+    _setup_logging(logging.INFO)
 
 if args.debug:
-    LOGGER.setLevel(logging.DEBUG)
-    pynetdicom_logger = logging.getLogger('pynetdicom')
-    pynetdicom_logger.setLevel(logging.DEBUG)
+    _setup_logging(logging.DEBUG)
 
 if args.log_level:
     levels = {'critical' : logging.CRITICAL,
@@ -143,15 +150,13 @@ if args.log_level:
               'warn'     : logging.WARNING,
               'info'     : logging.INFO,
               'debug'    : logging.DEBUG}
-    LOGGER.setLevel(levels[args.log_level])
-    pynetdicom_logger = logging.getLogger('pynetdicom')
-    pynetdicom_logger.setLevel(levels[args.log_level])
+    _setup_logging(levels[args.log_level])
 
 if args.log_config:
     fileConfig(args.log_config)
 
-LOGGER.debug('echoscp.py v{0!s}'.format(VERSION))
-LOGGER.debug('')
+APP_LOGGER.debug('echoscp.py v{0!s}'.format(VERSION))
+APP_LOGGER.debug('')
 
 # Validate port
 if isinstance(args.port, int):
@@ -161,7 +166,7 @@ if isinstance(args.port, int):
         test_socket.bind((os.popen('hostname').read()[:-1], args.port))
         test_socket.close()
     except socket.error:
-        LOGGER.error("Cannot listen on port {}, insufficient privileges or "
+        APP_LOGGER.error("Cannot listen on port {}, insufficient privileges or "
             "already in use".format(args.port))
         sys.exit()
 
@@ -187,13 +192,14 @@ if args.prefer_big and ExplicitVRBigEndian in transfer_syntax:
     transfer_syntax.insert(0, ExplicitVRBigEndian)
 
 
-def on_c_echo(context, info):
-    """Optional implementation of the AE.on_c_echo callback."""
+def handle_echo(event):
+    """Optional implementation of the evt.EVT_C_ECHO handler."""
     # Return a Success response to the peer
     # We could also return a pydicom Dataset with a (0000, 0900) Status
     #   element
     return 0x0000
 
+handlers = [(evt.EVT_C_ECHO, handle_echo)]
 
 # Create application entity
 ae = AE(ae_title=args.aetitle)
@@ -205,7 +211,4 @@ ae.network_timeout = args.timeout
 ae.acse_timeout = args.acse_timeout
 ae.dimse_timeout = args.dimse_timeout
 
-# Set callback
-ae.on_c_echo = on_c_echo
-
-ae.start_server(('', args.port))
+ae.start_server(('', args.port), evt_handlers=handlers)

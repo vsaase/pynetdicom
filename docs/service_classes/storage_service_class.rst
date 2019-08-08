@@ -2,8 +2,8 @@ Storage Service Class
 =====================
 The `Storage Service Class <http://dicom.nema.org/medical/dicom/current/output/html/part04.html#chapter_B>`_
 defines a service that facilitates the simple
-transfer of DICOM information Instances. It allows one DICOM Application Entity
-to send images, waveforms, reports, etc., to another using the C-STORE DIMSE-C
+transfer of DICOM SOP Instances. It allows one DICOM Application Entity
+to send images, waveforms, reports, etc., to another using the DIMSE C-STORE
 service.
 
 .. _storage_sops:
@@ -276,6 +276,15 @@ Supported SOP Classes
 | 1.2.840.10008.5.1.4.34.10        | RTBrachyApplicationSetupDeliveryInstructionsStorage               | A.79    |
 +----------------------------------+-------------------------------------------------------------------+---------+
 
+DIMSE Services
+--------------
+
++-----------------+-----------------------------------+
+| DIMSE Service   | Usage SCU/SCP                     |
++=================+===================================+
+| C-STORE         | Mandatory/Mandatory               |
++-----------------+-----------------------------------+
+
 .. _storage_statuses:
 
 Statuses
@@ -331,19 +340,19 @@ debugging.
 +------------------+----------+-----------------------------------------------+
 | Code (hex)       | Category | Description                                   |
 +==================+==========+===============================================+
-| 0xC001           | Failure  | User's callback implementation returned a     |
-|                  |          | status Dataset with no (0000,0900) *Status*   |
+| 0xC001           | Failure  | Handler bound to ``evt.EVT_C_STORE`` returned |
+|                  |          | a status Dataset with no (0000,0900) *Status* |
 |                  |          | element                                       |
 +------------------+----------+-----------------------------------------------+
-| 0xC002           | Failure  | User's callback implementation returned an    |
-|                  |          | invalid status object (not a pydicom Dataset  |
-|                  |          | or an int)                                    |
+| 0xC002           | Failure  | Handler bound to ``evt.EVT_C_STORE`` returned |
+|                  |          | an invalid status object (not a pydicom       |
+|                  |          | Dataset or an int)                            |
 +------------------+----------+-----------------------------------------------+
 | 0xC210           | Failure  | Failed to decode the dataset received from    |
 |                  |          | the peer                                      |
 +------------------+----------+-----------------------------------------------+
-| 0xC211           | Failure  | Unhandled exception raised by the user's      |
-|                  |          | implementation of the ``on_c_store`` callback |
+| 0xC211           | Failure  | Unhandled exception raised by the handler     |
+|                  |          | bound to ``evt.EVT_C_STORE``                  |
 +------------------+----------+-----------------------------------------------+
 
 

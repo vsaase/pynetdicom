@@ -1,0 +1,20 @@
+.. _v1.5.0:
+
+1.5.0
+=====
+
+Fixes
+.....
+
+* Fixed the AssociationServer not properly closing its sockets (:issue:`382`)
+* Improved the robustness of determining the local IP address (:issue:`394`)
+
+Changes
+.......
+
+* Using a key that corresponds to a given UID with
+  ``Association.send_c_find()``, ``Association.send_c_get()`` and
+  ``Association.send_c_move()`` removed as per planned deprecation. Use the
+  UID directly instead.
+* Python 3.4 is no longer officially supported, Python 3.7 is now officially
+  supported

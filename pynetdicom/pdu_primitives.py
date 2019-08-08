@@ -18,7 +18,7 @@ from pynetdicom.pdu_items import (
     UserIdentitySubItemAC
 )
 from pynetdicom.presentation import PresentationContext
-from pynetdicom.utils import validate_ae_title
+from pynetdicom.utils import validate_ae_title, validate_uid
 from pynetdicom._globals import DEFAULT_MAX_LENGTH
 
 LOGGER = logging.getLogger('pynetdicom.pdu_primitives')
@@ -292,9 +292,15 @@ class A_ASSOCIATE(object):
             raise TypeError("application_context_name must be a "
                             "pydicom.uid.UID, str or bytes")
 
-        if value is not None and not value.is_valid:
+        if value is not None and not validate_uid(value):
             LOGGER.error("application_context_name is an invalid UID")
             raise ValueError("application_context_name is an invalid UID")
+
+        if value and not value.is_valid:
+            LOGGER.warning(
+                "The Application Context Name '{}' is non-conformant"
+                .format(value)
+            )
 
         self._application_context_name = value
 
@@ -420,6 +426,12 @@ class A_ASSOCIATE(object):
         self._result = value
 
     @property
+    def result_str(self):
+        """Return the result as str."""
+        results = {1 : "Rejected Permanent", 2 : "Rejected Transient"}
+        return results[self.result]
+
+    @property
     def result_source(self):
         """Return the Result Source parameter."""
         return self._result_source
@@ -445,6 +457,16 @@ class A_ASSOCIATE(object):
             raise ValueError("Unknown A_ASSOCIATE.result_source value")
 
         self._result_source = value
+
+    @property
+    def source_str(self):
+        """Return the reject source as str."""
+        sources = {
+            1 : 'Service User',
+            2 : 'Service Provider (ACSE)',
+            3 : 'Service Provider (Presentation)'
+        }
+        return sources[self.result_source]
 
     @property
     def diagnostic(self):
@@ -486,6 +508,39 @@ class A_ASSOCIATE(object):
             raise ValueError("Unknown A_ASSOCIATE.diagnostic value")
 
         self._diagnostic = value
+
+    @property
+    def reason_str(self):
+        """Return the rejection reason as str."""
+        reasons = {
+            1 : {
+                1 : 'No reason given',
+                2 : 'Application context name not supported',
+                3 : 'Calling AE title not recognised',
+                4 : 'Reserved',
+                5 : 'Reserved',
+                6 : 'Reserved',
+                7 : 'Called AE title not recognised',
+                8 : 'Reserved',
+                9 : 'Reserved',
+                10 : 'Reserved',
+            },
+            2 : {
+                1 : 'No reason given',
+                2: 'Protocol version not supported'
+            },
+            3 : {
+                0 : "Reserved",
+                1 : "Temporary congestion",
+                2 : "Local limit exceeded",
+                3 : 'Reserved',
+                4 : 'Reserved',
+                5 : 'Reserved',
+                6 : 'Reserved',
+                7 : 'Reserved',
+            }
+        }
+        return reasons[self.result_source][self.diagnostic]
 
     @property
     def calling_presentation_address(self):
@@ -1228,10 +1283,18 @@ class ImplementationClassUIDNotification(ServiceParameter):
             raise TypeError("Implementation Class UID must be a "
                             "pydicom.uid.UID, str or bytes")
 
-        if value is not None and not value.is_valid:
-            LOGGER.error(
+        if value is not None and not validate_uid(value):
+            msg = (
                 "The Implementation Class UID Notification's 'Implementation "
                 "Class UID' parameter value '{}' is not a valid UID"
+                .format(value)
+            )
+            LOGGER.error(msg)
+            raise ValueError(msg)
+
+        if value and not value.is_valid:
+            LOGGER.warning(
+                "The Implementation Class UID '{}' is non-conformant"
                 .format(value)
             )
 
@@ -1666,9 +1729,15 @@ class SCP_SCU_RoleSelectionNegotiation(ServiceParameter):
             raise TypeError("SOP Class UID must be a pydicom.uid.UID, str "
                             "or bytes")
 
-        if value is not None and not value.is_valid:
-            LOGGER.error("Implementation Class UID is an invalid UID")
-            raise ValueError("Implementation Class UID is an invalid UID")
+        if value is not None and not validate_uid(value):
+            LOGGER.error("SOP Class UID is an invalid UID")
+            raise ValueError("SOP Class UID is an invalid UID")
+
+        if value and not value.is_valid:
+            LOGGER.warning(
+                "The SOP Class UID '{}' is non-conformant"
+                .format(value)
+            )
 
         self._sop_class_uid = value
 
@@ -1808,9 +1877,15 @@ class SOPClassExtendedNegotiation(ServiceParameter):
             raise TypeError("SOP Class UID must be a pydicom.uid.UID, str "
                             "or bytes")
 
-        if value is not None and not value.is_valid:
-            LOGGER.error("Implementation Class UID is an invalid UID")
-            raise ValueError("Implementation Class UID is an invalid UID")
+        if value is not None and not validate_uid(value):
+            LOGGER.error("SOP Class UID is an invalid UID")
+            raise ValueError("SOP Class UID is an invalid UID")
+
+        if value and not value.is_valid:
+            LOGGER.warning(
+                "The SOP Class UID '{}' is non-conformant"
+                .format(value)
+            )
 
         self._sop_class_uid = value
 
@@ -1916,27 +1991,37 @@ class SOPClassCommonExtendedNegotiation(ServiceParameter):
                 elif isinstance(uid, bytes):
                     uid = UID(uid.decode('ascii'))
                 else:
-                    LOGGER.error("Related General SOP Class Identification "
-                                 "must be a list of pydicom.uid.UID, str "
-                                 "or bytes")
-                    raise TypeError("Related General SOP Class "
-                                    "Identification must be a list of "
-                                    "pydicom.uid.UID, str or bytes")
+                    msg = (
+                        "Related General SOP Class Identification "
+                        "must be a list of pydicom.uid.UID, str or bytes"
+                    )
+                    LOGGER.error(msg)
+                    raise TypeError(msg)
 
-                if uid is not None and not uid.is_valid:
-                    LOGGER.warning("Related General SOP Class "
-                                   "Identification contains an invalid UID")
+                if uid is not None and not validate_uid(uid):
+                    msg = (
+                        "Related General SOP Class "
+                        "Identification contains an invalid UID"
+                    )
+                    LOGGER.error(msg)
+                    raise ValueError(msg)
+
+                if uid and not uid.is_valid:
+                    LOGGER.warning(
+                        "The Related General SOP Class UID '{}' is "
+                        "non-conformant".format(uid)
+                    )
 
                 valid_uid_list.append(uid)
 
             self._related_general_sop_class_identification = valid_uid_list
         else:
-            LOGGER.error("Related General SOP Class Identification "
-                         "must be a list of pydicom.uid.UID, str "
-                         "or bytes")
-            raise TypeError("Related General SOP Class Identification "
-                            "must be a list of pydicom.uid.UID, str "
-                            "or bytes")
+            msg = (
+                "Related General SOP Class Identification "
+                "must be a list of pydicom.uid.UID, str or bytes"
+            )
+            LOGGER.error(msg)
+            raise TypeError(msg)
 
     @property
     def service_class_uid(self):
@@ -1967,13 +2052,19 @@ class SOPClassCommonExtendedNegotiation(ServiceParameter):
         elif value is None:
             pass
         else:
-            LOGGER.error("Service Class UID must be a pydicom.uid.UID, str "
-                         "or bytes")
-            raise TypeError("Service Class UID must be a pydicom.uid.UID, "
-                            "str or bytes")
+            msg = "Service Class UID must be a pydicom.uid.UID, str or bytes"
+            LOGGER.error(msg)
+            raise TypeError(msg)
 
-        if value is not None and not value.is_valid:
-            LOGGER.warning("Implementation Class UID is an invalid UID")
+        if value is not None and not validate_uid(value):
+            LOGGER.error("Service Class UID is an invalid UID")
+            raise ValueError("Service Class UID is an invalid UID")
+
+        if value and not value.is_valid:
+            LOGGER.warning(
+                "The Service Class UID '{}' is non-conformant"
+                .format(value)
+            )
 
         self._service_class_uid = value
 
@@ -2006,13 +2097,19 @@ class SOPClassCommonExtendedNegotiation(ServiceParameter):
         elif value is None:
             pass
         else:
-            LOGGER.error("SOP Class UID must be a pydicom.uid.UID, str "
-                         "or bytes")
-            raise TypeError("SOP Class UID must be a pydicom.uid.UID, str "
-                            "or bytes")
+            msg = "SOP Class UID must be a pydicom.uid.UID, str or bytes"
+            LOGGER.error(msg)
+            raise TypeError(msg)
 
-        if value is not None and not value.is_valid:
-            LOGGER.warning("Implementation Class UID is an invalid UID")
+        if value is not None and not validate_uid(value):
+            LOGGER.error("SOP Class UID is an invalid UID")
+            raise ValueError("SOP Class UID is an invalid UID")
+
+        if value and not value.is_valid:
+            LOGGER.warning(
+                "The SOP Class UID '{}' is non-conformant"
+                .format(value)
+            )
 
         self._sop_class_uid = value
 
@@ -2070,7 +2167,7 @@ class UserIdentityNegotiation(ServiceParameter):
     server_response : bytes or None
         A-ASSOCIATE-AC only. Shall contain the Kerberos Service ticket or SAML
         response if the `user_identity_type` in the Request was 3 or 4. Shall
-         be None if `user_identity_type` was 1 or 2.
+        be `None` if `user_identity_type` was 1 or 2.
 
     Examples
     --------

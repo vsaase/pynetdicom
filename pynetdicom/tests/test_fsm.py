@@ -1,15 +1,17 @@
 """Unit tests for fsm.py"""
 
+import datetime
 import logging
 import select
 import socket
 from struct import pack
+import sys
 import threading
 import time
 
 import pytest
 
-from pynetdicom import AE, build_context
+from pynetdicom import AE, build_context, evt, debug_logger
 from pynetdicom.association import Association
 from pynetdicom import fsm as FINITE_STATE
 from pynetdicom.fsm import *
@@ -30,9 +32,7 @@ from .encoded_pdu_items import (
 from .parrot import ThreadedParrot
 
 
-LOGGER = logging.getLogger("pynetdicom")
-LOGGER.setLevel(logging.CRITICAL)
-LOGGER.setLevel(logging.DEBUG)
+#debug_logger()
 
 
 REFERENCE_BAD_EVENTS = [
@@ -202,8 +202,8 @@ class TestStateBase(object):
         assoc.acceptor.port = 11112
 
         # Association Requestor object -> local AE
-        assoc.requestor.address = ae.address
-        assoc.requestor.port = ae.port
+        assoc.requestor.address = ''
+        assoc.requestor.port = 11113
         assoc.requestor.ae_title = ae.ae_title
         assoc.requestor.maximum_length = 16382
         assoc.requestor.implementation_class_uid = (
@@ -384,8 +384,8 @@ class TestStateBase(object):
         assoc.acceptor.port = 11112
 
         # Association Requestor object -> local AE
-        assoc.requestor.address = ae.address
-        assoc.requestor.port = ae.port
+        assoc.requestor.address = ''
+        assoc.requestor.port = 11113
         assoc.requestor.ae_title = ae.ae_title
         assoc.requestor.maximum_length = 16382
         assoc.requestor.implementation_class_uid = (
@@ -398,7 +398,6 @@ class TestStateBase(object):
         cx = build_context(VerificationSOPClass)
         cx.context_id = 1
         assoc.acceptor.supported_contexts = [cx]
-
 
         fsm = self.monkey_patch(assoc.dul.state_machine)
         return assoc, fsm
@@ -1313,7 +1312,7 @@ class TestState03(TestStateBase):
 
         assoc, fsm = self.get_acceptor_assoc()
 
-        def _neg_as_acc(assoc):
+        def _neg_as_acc():
             """Override ACSE._negotiate_as_acceptor so no A-ASSOCIATE (rsp)."""
             pass
 
@@ -1360,11 +1359,11 @@ class TestState03(TestStateBase):
         assoc, fsm = self.get_acceptor_assoc()
 
         orig = assoc.acse._negotiate_as_acceptor
-        def _neg_as_acc(assoc):
+        def _neg_as_acc():
             """Override ACSE._negotiate_as_acceptor so no A-ASSOCIATE (rsp)."""
             # Keep the state machine in Sta3 for 0.5 s
             time.sleep(0.5)
-            orig(assoc)
+            orig()
 
         assoc.acse._negotiate_as_acceptor = _neg_as_acc
         assoc.start()
@@ -1399,11 +1398,11 @@ class TestState03(TestStateBase):
         assoc, fsm = self.get_acceptor_assoc()
 
         orig = assoc.acse._negotiate_as_acceptor
-        def _neg_as_acc(assoc):
+        def _neg_as_acc():
             """Override ACSE._negotiate_as_acceptor so no A-ASSOCIATE (rsp)."""
             # Keep the state machine in Sta3 for 0.5 s
             time.sleep(0.5)
-            orig(assoc)
+            orig()
 
         assoc.acse._negotiate_as_acceptor = _neg_as_acc
         assoc.start()
@@ -1445,11 +1444,11 @@ class TestState03(TestStateBase):
         assoc, fsm = self.get_acceptor_assoc()
 
         orig = assoc.acse._negotiate_as_acceptor
-        def _neg_as_acc(assoc):
+        def _neg_as_acc():
             """Override ACSE._negotiate_as_acceptor so no A-ASSOCIATE (rsp)."""
             # Keep the state machine in Sta3 for 0.5 s
             time.sleep(0.5)
-            orig(assoc)
+            orig()
 
         assoc.acse._negotiate_as_acceptor = _neg_as_acc
         assoc.start()
@@ -1512,7 +1511,7 @@ class TestState03(TestStateBase):
         assoc, fsm = self.get_acceptor_assoc()
 
         orig = assoc.acse._negotiate_as_acceptor
-        def _neg_as_acc(assoc):
+        def _neg_as_acc():
             """Override ACSE._negotiate_as_acceptor so no A-ASSOCIATE (rsp)."""
             assoc.dul.send_pdu(self.get_associate('reject'))
 
@@ -1547,7 +1546,7 @@ class TestState03(TestStateBase):
         assoc, fsm = self.get_acceptor_assoc()
 
         orig = assoc.acse._negotiate_as_acceptor
-        def _neg_as_acc(assoc):
+        def _neg_as_acc():
             """Override ACSE._negotiate_as_acceptor so no A-ASSOCIATE (rsp)."""
             assoc.dul.send_pdu(self.get_pdata())
 
@@ -1583,11 +1582,11 @@ class TestState03(TestStateBase):
         assoc, fsm = self.get_acceptor_assoc()
 
         orig = assoc.acse._negotiate_as_acceptor
-        def _neg_as_acc(assoc):
+        def _neg_as_acc():
             """Override ACSE._negotiate_as_acceptor so no A-ASSOCIATE (rsp)."""
             # Keep the state machine in Sta3 for 0.5 s
             time.sleep(0.5)
-            orig(assoc)
+            orig()
 
         assoc.acse._negotiate_as_acceptor = _neg_as_acc
         assoc.start()
@@ -1620,7 +1619,7 @@ class TestState03(TestStateBase):
         assoc, fsm = self.get_acceptor_assoc()
 
         orig = assoc.acse._negotiate_as_acceptor
-        def _neg_as_acc(assoc):
+        def _neg_as_acc():
             """Override ACSE._negotiate_as_acceptor so no A-ASSOCIATE (rsp)."""
             assoc.dul.send_pdu(self.get_release(False))
 
@@ -1656,11 +1655,11 @@ class TestState03(TestStateBase):
         assoc, fsm = self.get_acceptor_assoc()
 
         orig = assoc.acse._negotiate_as_acceptor
-        def _neg_as_acc(assoc):
+        def _neg_as_acc():
             """Override ACSE._negotiate_as_acceptor so no A-ASSOCIATE (rsp)."""
             # Keep the state machine in Sta3 for 0.5 s
             time.sleep(0.5)
-            orig(assoc)
+            orig()
 
         assoc.acse._negotiate_as_acceptor = _neg_as_acc
         assoc.start()
@@ -1695,11 +1694,11 @@ class TestState03(TestStateBase):
         assoc, fsm = self.get_acceptor_assoc()
 
         orig = assoc.acse._negotiate_as_acceptor
-        def _neg_as_acc(assoc):
+        def _neg_as_acc():
             """Override ACSE._negotiate_as_acceptor so no A-ASSOCIATE (rsp)."""
             # Keep the state machine in Sta3 for 0.5 s
             time.sleep(0.5)
-            orig(assoc)
+            orig()
 
         assoc.acse._negotiate_as_acceptor = _neg_as_acc
         assoc.start()
@@ -1732,7 +1731,7 @@ class TestState03(TestStateBase):
         assoc, fsm = self.get_acceptor_assoc()
 
         orig = assoc.acse._negotiate_as_acceptor
-        def _neg_as_acc(assoc):
+        def _neg_as_acc():
             """Override ACSE._negotiate_as_acceptor so no A-ASSOCIATE (rsp)."""
             assoc.dul.send_pdu(self.get_release(True))
 
@@ -1767,7 +1766,7 @@ class TestState03(TestStateBase):
         assoc, fsm = self.get_acceptor_assoc()
 
         orig = assoc.acse._negotiate_as_acceptor
-        def _neg_as_acc(assoc):
+        def _neg_as_acc():
             """Override ACSE._negotiate_as_acceptor so no A-ASSOCIATE (rsp)."""
             assoc.dul.send_pdu(self.get_abort())
 
@@ -1804,11 +1803,11 @@ class TestState03(TestStateBase):
         assoc, fsm = self.get_acceptor_assoc()
 
         orig = assoc.acse._negotiate_as_acceptor
-        def _neg_as_acc(assoc):
+        def _neg_as_acc():
             """Override ACSE._negotiate_as_acceptor so no A-ASSOCIATE (rsp)."""
             # Keep the state machine in Sta3 for 0.5 s
             time.sleep(0.5)
-            orig(assoc)
+            orig()
 
         assoc.acse._negotiate_as_acceptor = _neg_as_acc
         assoc.start()
@@ -1841,11 +1840,11 @@ class TestState03(TestStateBase):
         assoc, fsm = self.get_acceptor_assoc()
 
         orig = assoc.acse._negotiate_as_acceptor
-        def _neg_as_acc(assoc):
+        def _neg_as_acc():
             """Override ACSE._negotiate_as_acceptor so no A-ASSOCIATE (rsp)."""
             # Keep the state machine in Sta3 for 0.5 s
             time.sleep(0.5)
-            orig(assoc)
+            orig()
 
         assoc.acse._negotiate_as_acceptor = _neg_as_acc
         assoc.start()
@@ -1878,13 +1877,13 @@ class TestState03(TestStateBase):
         assoc, fsm = self.get_acceptor_assoc()
 
         orig = assoc.acse._negotiate_as_acceptor
-        def _neg_as_acc(assoc):
+        def _neg_as_acc():
             """Override ACSE._negotiate_as_acceptor so no A-ASSOCIATE (rsp)."""
             # Keep the state machine in Sta3 for 0.5 s
             assoc.dul.artim_timer.timeout = 0.05
             assoc.dul.artim_timer.start()
             time.sleep(0.2)
-            orig(assoc)
+            orig()
 
         assoc.acse._negotiate_as_acceptor = _neg_as_acc
         assoc.start()
@@ -1918,11 +1917,11 @@ class TestState03(TestStateBase):
         assoc, fsm = self.get_acceptor_assoc()
 
         orig = assoc.acse._negotiate_as_acceptor
-        def _neg_as_acc(assoc):
+        def _neg_as_acc():
             """Override ACSE._negotiate_as_acceptor so no A-ASSOCIATE (rsp)."""
             # Keep the state machine in Sta3 for 0.5 s
             time.sleep(0.5)
-            orig(assoc)
+            orig()
 
         assoc.acse._negotiate_as_acceptor = _neg_as_acc
         assoc.start()
@@ -2333,6 +2332,9 @@ class TestState04(TestStateBase):
 
         self.assoc.dul.socket.connect = connect
         self.assoc.start()
+        while not self.fsm.current_state == 'Sta4':
+            time.sleep(0.05)
+
         time.sleep(0.2)
 
         #self.print_fsm_scp(self.fsm, scp)
@@ -3123,6 +3125,7 @@ class TestState06(TestStateBase):
         commands = [
             ('recv', None),
             ('send', a_associate_ac),
+            ('wait', 0.1),
             ('send', a_associate_ac),
             ('recv', None),
         ]
@@ -3131,7 +3134,7 @@ class TestState06(TestStateBase):
         self.assoc.start()
 
         while not self.assoc.is_established:
-            time.sleep(0.05)
+            time.sleep(0.01)
         time.sleep(0.2)
 
         #self.print_fsm_scp(self.fsm, scp)
@@ -3160,6 +3163,7 @@ class TestState06(TestStateBase):
         commands = [
             ('recv', None),
             ('send', a_associate_ac),
+            ('wait', 0.1),
             ('send', a_associate_rj),
             ('recv', None),
         ]
@@ -3204,6 +3208,7 @@ class TestState06(TestStateBase):
         commands = [
             ('recv', None),
             ('send', a_associate_ac),
+            ('wait', 0.1),
             ('send', a_associate_rq),
             ('recv', None),
         ]
@@ -3333,6 +3338,7 @@ class TestState06(TestStateBase):
         commands = [
             ('recv', None),
             ('send', a_associate_ac),
+            ('wait', 0.1),
             ('send', p_data_tf),
         ]
         scp = self.start_server(commands)
@@ -3394,6 +3400,7 @@ class TestState06(TestStateBase):
         commands = [
             ('recv', None),
             ('send', a_associate_ac),
+            ('wait', 0.1),
             ('send', a_release_rq),
         ]
         scp = self.start_server(commands)
@@ -3425,6 +3432,7 @@ class TestState06(TestStateBase):
         commands = [
             ('recv', None),
             ('send', a_associate_ac),
+            ('wait', 0.1),
             ('send', a_release_rp),
             ('recv', None),
         ]
@@ -3529,6 +3537,7 @@ class TestState06(TestStateBase):
         commands = [
             ('recv', None),
             ('send', a_associate_ac),
+            ('wait', 0.1),
             ('send', a_abort),
         ]
         scp = self.start_server(commands)
@@ -3560,6 +3569,7 @@ class TestState06(TestStateBase):
         commands = [
             ('recv', None),
             ('send', a_associate_ac),
+            ('wait', 0.1),
         ]
         scp = self.start_server(commands)
 
@@ -3622,6 +3632,7 @@ class TestState06(TestStateBase):
         commands = [
             ('recv', None),
             ('send', a_associate_ac),
+            ('wait', 0.1),
             ('send', b'\x08\x00\x00\x00\x00\x00'),
             ('recv', None),
         ]
@@ -4276,12 +4287,13 @@ class TestState08(TestStateBase):
         commands = [
             ('recv', None),
             ('send', a_associate_ac),
+            ('wait', 0.1),
             ('send', a_release_rq),
             ('wait', 0.3),
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -4322,13 +4334,14 @@ class TestState08(TestStateBase):
         commands = [
             ('recv', None),
             ('send', a_associate_ac),
+            ('wait', 0.1),
             ('send', a_release_rq),
             ('send', a_associate_ac),
             ('wait', 0.3),
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -4361,13 +4374,14 @@ class TestState08(TestStateBase):
         commands = [
             ('recv', None),
             ('send', a_associate_ac),
+            ('wait', 0.1),
             ('send', a_release_rq),
             ('send', a_associate_rj),
             ('wait', 0.3),
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -4407,13 +4421,14 @@ class TestState08(TestStateBase):
         commands = [
             ('recv', None),
             ('send', a_associate_ac),
+            ('wait', 0.1),
             ('send', a_release_rq),
             ('send', a_associate_rq),
             ('wait', 0.3),
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -4445,12 +4460,13 @@ class TestState08(TestStateBase):
         commands = [
             ('recv', None),
             ('send', a_associate_ac),
+            ('wait', 0.1),
             ('send', a_release_rq),
             ('wait', 0.3),
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -4482,12 +4498,13 @@ class TestState08(TestStateBase):
         commands = [
             ('recv', None),
             ('send', a_associate_ac),
+            ('wait', 0.1),
             ('send', a_release_rq),
             ('wait', 0.3),
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -4520,12 +4537,13 @@ class TestState08(TestStateBase):
         commands = [
             ('recv', None),
             ('send', a_associate_ac),
+            ('wait', 0.1),
             ('send', a_release_rq),
             ('wait', 0.3),
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -4558,13 +4576,14 @@ class TestState08(TestStateBase):
         commands = [
             ('recv', None),
             ('send', a_associate_ac),
+            ('wait', 0.1),
             ('send', a_release_rq),
             ('send', p_data_tf),
             ('wait', 0.3),
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -4596,12 +4615,13 @@ class TestState08(TestStateBase):
         commands = [
             ('recv', None),
             ('send', a_associate_ac),
+            ('wait', 0.1),
             ('send', a_release_rq),
             ('wait', 0.3),
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -4634,13 +4654,14 @@ class TestState08(TestStateBase):
         commands = [
             ('recv', None),  # get a_assoc_rq
             ('send', a_associate_ac),
+            ('wait', 0.1),
             ('send', a_release_rq),
             ('send', a_release_rq),
             ('wait', 0.3),
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -4673,13 +4694,14 @@ class TestState08(TestStateBase):
         commands = [
             ('recv', None),
             ('send', a_associate_ac),
+            ('wait', 0.1),
             ('send', a_release_rq),
             ('send', a_release_rp),
             ('wait', 0.3),
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -4712,12 +4734,13 @@ class TestState08(TestStateBase):
         commands = [
             ('recv', None),
             ('send', a_associate_ac),
+            ('wait', 0.1),
             ('send', a_release_rq),
             ('wait', 0.3),
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -4750,12 +4773,13 @@ class TestState08(TestStateBase):
         commands = [
             ('recv', None),
             ('send', a_associate_ac),
+            ('wait', 0.1),
             ('send', a_release_rq),
             ('wait', 0.3),
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -4788,13 +4812,14 @@ class TestState08(TestStateBase):
         commands = [
             ('recv', None),
             ('send', a_associate_ac),
+            ('wait', 0.1),
             ('send', a_release_rq),
             ('send', a_abort),
             ('wait', 0.3),
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -4827,11 +4852,12 @@ class TestState08(TestStateBase):
         commands = [
             ('recv', None),
             ('send', a_associate_ac),
+            ('wait', 0.1),
             ('send', a_release_rq),
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -4863,12 +4889,13 @@ class TestState08(TestStateBase):
         commands = [
             ('recv', None),
             ('send', a_associate_ac),
+            ('wait', 0.1),
             ('send', a_release_rq),
             ('wait', 0.3),
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -4903,12 +4930,13 @@ class TestState08(TestStateBase):
         commands = [
             ('recv', None),
             ('send', a_associate_ac),
+            ('wait', 0.1),
             ('send', a_release_rq),
             ('send', b'\x08\x00\x00\x00\x00\x00'),
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -4949,7 +4977,7 @@ class TestState09(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -5004,7 +5032,7 @@ class TestState09(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -5054,7 +5082,7 @@ class TestState09(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -5111,7 +5139,7 @@ class TestState09(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -5159,7 +5187,7 @@ class TestState09(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -5205,7 +5233,7 @@ class TestState09(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -5251,7 +5279,7 @@ class TestState09(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -5299,7 +5327,7 @@ class TestState09(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -5347,7 +5375,7 @@ class TestState09(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -5395,7 +5423,7 @@ class TestState09(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -5445,7 +5473,7 @@ class TestState09(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -5494,7 +5522,7 @@ class TestState09(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -5544,7 +5572,7 @@ class TestState09(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -5595,7 +5623,7 @@ class TestState09(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -5640,7 +5668,7 @@ class TestState09(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -5685,7 +5713,7 @@ class TestState09(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -5734,7 +5762,7 @@ class TestState09(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -5786,7 +5814,7 @@ class TestState10(TestStateBase):
         scp = self.start_server(commands)
 
         assoc, fsm = self.get_acceptor_assoc()
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -5841,7 +5869,7 @@ class TestState10(TestStateBase):
         scp = self.start_server(commands)
 
         assoc, fsm = self.get_acceptor_assoc()
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -5891,7 +5919,7 @@ class TestState10(TestStateBase):
         scp = self.start_server(commands)
 
         assoc, fsm = self.get_acceptor_assoc()
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -5948,7 +5976,7 @@ class TestState10(TestStateBase):
         scp = self.start_server(commands)
 
         assoc, fsm = self.get_acceptor_assoc()
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -5997,7 +6025,7 @@ class TestState10(TestStateBase):
 
         assoc, fsm = self.get_acceptor_assoc()
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -6044,7 +6072,7 @@ class TestState10(TestStateBase):
 
         assoc, fsm = self.get_acceptor_assoc()
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -6091,7 +6119,7 @@ class TestState10(TestStateBase):
 
         assoc, fsm = self.get_acceptor_assoc()
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -6139,7 +6167,7 @@ class TestState10(TestStateBase):
         scp = self.start_server(commands)
 
         assoc, fsm = self.get_acceptor_assoc()
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -6188,7 +6216,7 @@ class TestState10(TestStateBase):
 
         assoc, fsm = self.get_acceptor_assoc()
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -6236,7 +6264,7 @@ class TestState10(TestStateBase):
         scp = self.start_server(commands)
 
         assoc, fsm = self.get_acceptor_assoc()
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -6285,7 +6313,7 @@ class TestState10(TestStateBase):
         scp = self.start_server(commands)
 
         assoc, fsm = self.get_acceptor_assoc()
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -6331,7 +6359,7 @@ class TestState10(TestStateBase):
 
         assoc, fsm = self.get_acceptor_assoc()
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -6380,7 +6408,7 @@ class TestState10(TestStateBase):
 
         assoc, fsm = self.get_acceptor_assoc()
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -6432,7 +6460,7 @@ class TestState10(TestStateBase):
         scp = self.start_server(commands)
 
         assoc, fsm = self.get_acceptor_assoc()
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -6478,7 +6506,7 @@ class TestState10(TestStateBase):
         scp = self.start_server(commands)
 
         assoc, fsm = self.get_acceptor_assoc()
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -6525,7 +6553,7 @@ class TestState10(TestStateBase):
 
         assoc, fsm = self.get_acceptor_assoc()
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -6577,7 +6605,7 @@ class TestState10(TestStateBase):
         scp = self.start_server(commands)
 
         assoc, fsm = self.get_acceptor_assoc()
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -6629,7 +6657,7 @@ class TestState11(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -6689,7 +6717,7 @@ class TestState11(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -6741,7 +6769,7 @@ class TestState11(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -6800,7 +6828,7 @@ class TestState11(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -6849,7 +6877,7 @@ class TestState11(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -6899,7 +6927,7 @@ class TestState11(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -6949,7 +6977,7 @@ class TestState11(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -7002,7 +7030,7 @@ class TestState11(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -7051,7 +7079,7 @@ class TestState11(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -7104,7 +7132,7 @@ class TestState11(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -7155,7 +7183,7 @@ class TestState11(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -7204,7 +7232,7 @@ class TestState11(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -7256,7 +7284,7 @@ class TestState11(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -7308,7 +7336,7 @@ class TestState11(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -7357,7 +7385,7 @@ class TestState11(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -7406,7 +7434,7 @@ class TestState11(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -7460,7 +7488,7 @@ class TestState11(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -7513,7 +7541,7 @@ class TestState12(TestStateBase):
         scp = self.start_server(commands)
 
         assoc, fsm = self.get_acceptor_assoc()
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -7570,7 +7598,7 @@ class TestState12(TestStateBase):
         scp = self.start_server(commands)
 
         assoc, fsm = self.get_acceptor_assoc()
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -7622,7 +7650,7 @@ class TestState12(TestStateBase):
         scp = self.start_server(commands)
 
         assoc, fsm = self.get_acceptor_assoc()
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -7682,7 +7710,7 @@ class TestState12(TestStateBase):
         scp = self.start_server(commands)
 
         assoc, fsm = self.get_acceptor_assoc()
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -7726,7 +7754,7 @@ class TestState12(TestStateBase):
         # Evt7: Receive A-ASSOCIATE (accept) primitive from <local user>
         commands = [
             ('send', a_associate_rq),
-            ('recv', None),  # recv a-associate-rq
+            ('recv', None),  # recv a-associate-ac
             ('recv', None),  # recv a-release-rq
             ('send', a_release_rq),  # collide
             ('send', a_release_rp),
@@ -7735,7 +7763,7 @@ class TestState12(TestStateBase):
         scp = self.start_server(commands)
 
         assoc, fsm = self.get_acceptor_assoc()
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -7784,7 +7812,7 @@ class TestState12(TestStateBase):
         scp = self.start_server(commands)
 
         assoc, fsm = self.get_acceptor_assoc()
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -7833,7 +7861,7 @@ class TestState12(TestStateBase):
         scp = self.start_server(commands)
 
         assoc, fsm = self.get_acceptor_assoc()
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -7884,7 +7912,7 @@ class TestState12(TestStateBase):
         scp = self.start_server(commands)
 
         assoc, fsm = self.get_acceptor_assoc()
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -7937,7 +7965,7 @@ class TestState12(TestStateBase):
         scp = self.start_server(commands)
 
         assoc, fsm = self.get_acceptor_assoc()
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -7988,7 +8016,7 @@ class TestState12(TestStateBase):
         scp = self.start_server(commands)
 
         assoc, fsm = self.get_acceptor_assoc()
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -8041,7 +8069,7 @@ class TestState12(TestStateBase):
         scp = self.start_server(commands)
 
         assoc, fsm = self.get_acceptor_assoc()
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -8093,7 +8121,7 @@ class TestState12(TestStateBase):
         scp = self.start_server(commands)
 
         assoc, fsm = self.get_acceptor_assoc()
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -8147,7 +8175,7 @@ class TestState12(TestStateBase):
         scp = self.start_server(commands)
 
         assoc, fsm = self.get_acceptor_assoc()
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -8201,7 +8229,7 @@ class TestState12(TestStateBase):
         scp = self.start_server(commands)
 
         assoc, fsm = self.get_acceptor_assoc()
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -8249,7 +8277,7 @@ class TestState12(TestStateBase):
         scp = self.start_server(commands)
 
         assoc, fsm = self.get_acceptor_assoc()
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -8297,7 +8325,7 @@ class TestState12(TestStateBase):
         scp = self.start_server(commands)
 
         assoc, fsm = self.get_acceptor_assoc()
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -8348,7 +8376,7 @@ class TestState12(TestStateBase):
         scp = self.start_server(commands)
 
         assoc, fsm = self.get_acceptor_assoc()
-        def is_release_requested(assoc):
+        def is_release_requested():
             """Override ACSE.is_release_requested."""
             return False
 
@@ -8398,9 +8426,9 @@ class TestState13(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def patch_neg_rq(assoc):
+        def patch_neg_rq():
             """Override ACSE._negotiate_as_requestor"""
-            assoc.acse.send_request(assoc)
+            self.assoc.acse.send_request()
 
         self.assoc.acse._negotiate_as_requestor = patch_neg_rq
 
@@ -8446,18 +8474,17 @@ class TestState13(TestStateBase):
         # AA-6: Ignore PDU
         commands = [
             ('recv', None),
-            ('send', a_associate_rq),
+            ('send', a_associate_ac),
+            ('wait', 0.1),
+            ('send', a_associate_ac),
             ('send', a_associate_ac),
             ('wait', 0.1),
         ]
         scp = self.start_server(commands)
 
-        def patch_neg_rq(assoc):
-            """Override ACSE._negotiate_as_requestor"""
-            assoc.acse.send_request(assoc)
-
-        self.assoc.acse._negotiate_as_requestor = patch_neg_rq
         self.assoc.start()
+        while not self.assoc.is_established:
+            time.sleep(0.05)
 
         time.sleep(0.2)
 
@@ -8465,14 +8492,19 @@ class TestState13(TestStateBase):
 
         scp.shutdown()
 
-        assert self.fsm._changes[:4] == [
+        assert self.fsm._changes[:5] == [
             ('Sta1', 'Evt1', 'AE-1'),
             ('Sta4', 'Evt2', 'AE-2'),
-            ('Sta5', 'Evt6', 'AA-8'),
+            ('Sta5', 'Evt3', 'AE-3'),
+            ('Sta6', 'Evt3', 'AA-8'),
             ('Sta13', 'Evt3', 'AA-6'),
         ]
-        assert self.fsm._transitions[:4] == ['Sta4', 'Sta5', 'Sta13', 'Sta13']
-        assert self.fsm._events[:4] == ['Evt1', 'Evt2', 'Evt6', 'Evt3']
+        assert self.fsm._transitions[:4] == [
+            'Sta4', 'Sta5', 'Sta6', 'Sta13'
+        ]
+        assert self.fsm._events[:5] == [
+            'Evt1', 'Evt2', 'Evt3', 'Evt3', 'Evt3'
+        ]
 
     def test_evt04(self):
         """Test Sta13 + Evt4."""
@@ -8481,18 +8513,17 @@ class TestState13(TestStateBase):
         # AA-6: Ignore PDU
         commands = [
             ('recv', None),
-            ('send', a_associate_rq),
+            ('send', a_associate_ac),
+            ('wait', 0.1),
+            ('send', a_associate_ac),
             ('send', a_associate_rj),
             ('wait', 0.1),
         ]
         scp = self.start_server(commands)
 
-        def patch_neg_rq(assoc):
-            """Override ACSE._negotiate_as_requestor"""
-            assoc.acse.send_request(assoc)
-
-        self.assoc.acse._negotiate_as_requestor = patch_neg_rq
         self.assoc.start()
+        while not self.assoc.is_established:
+            time.sleep(0.05)
 
         time.sleep(0.2)
 
@@ -8500,14 +8531,19 @@ class TestState13(TestStateBase):
 
         scp.shutdown()
 
-        assert self.fsm._changes[:4] == [
+        assert self.fsm._changes[:5] == [
             ('Sta1', 'Evt1', 'AE-1'),
             ('Sta4', 'Evt2', 'AE-2'),
-            ('Sta5', 'Evt6', 'AA-8'),
+            ('Sta5', 'Evt3', 'AE-3'),
+            ('Sta6', 'Evt3', 'AA-8'),
             ('Sta13', 'Evt4', 'AA-6'),
         ]
-        assert self.fsm._transitions[:4] == ['Sta4', 'Sta5', 'Sta13', 'Sta13']
-        assert self.fsm._events[:4] == ['Evt1', 'Evt2', 'Evt6', 'Evt4']
+        assert self.fsm._transitions[:4] == [
+            'Sta4', 'Sta5', 'Sta6', 'Sta13'
+        ]
+        assert self.fsm._events[:5] == [
+            'Evt1', 'Evt2', 'Evt3', 'Evt3', 'Evt4'
+        ]
 
     @pytest.mark.skip()
     def test_evt05(self):
@@ -8523,18 +8559,17 @@ class TestState13(TestStateBase):
         # AA-7: Send A-ABORT PDU to <remote>
         commands = [
             ('recv', None),
-            ('send', a_associate_rq),
+            ('send', a_associate_ac),
+            ('wait', 0.1),
+            ('send', a_associate_ac),
             ('send', a_associate_rq),
             ('wait', 0.1),
         ]
         scp = self.start_server(commands)
 
-        def patch_neg_rq(assoc):
-            """Override ACSE._negotiate_as_requestor"""
-            assoc.acse.send_request(assoc)
-
-        self.assoc.acse._negotiate_as_requestor = patch_neg_rq
         self.assoc.start()
+        while not self.assoc.is_established:
+            time.sleep(0.05)
 
         time.sleep(0.2)
 
@@ -8542,14 +8577,19 @@ class TestState13(TestStateBase):
 
         scp.shutdown()
 
-        assert self.fsm._changes[:4] == [
+        assert self.fsm._changes[:5] == [
             ('Sta1', 'Evt1', 'AE-1'),
             ('Sta4', 'Evt2', 'AE-2'),
-            ('Sta5', 'Evt6', 'AA-8'),
+            ('Sta5', 'Evt3', 'AE-3'),
+            ('Sta6', 'Evt3', 'AA-8'),
             ('Sta13', 'Evt6', 'AA-7'),
         ]
-        assert self.fsm._transitions[:4] == ['Sta4', 'Sta5', 'Sta13', 'Sta13']
-        assert self.fsm._events[:4] == ['Evt1', 'Evt2', 'Evt6', 'Evt6']
+        assert self.fsm._transitions[:4] == [
+            'Sta4', 'Sta5', 'Sta6', 'Sta13'
+        ]
+        assert self.fsm._events[:5] == [
+            'Evt1', 'Evt2', 'Evt3', 'Evt3', 'Evt6'
+        ]
 
     def test_evt07(self):
         """Test Sta13 + Evt7."""
@@ -8562,9 +8602,9 @@ class TestState13(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def patch_neg_rq(assoc):
+        def patch_neg_rq():
             """Override ACSE._negotiate_as_requestor"""
-            assoc.acse.send_request(assoc)
+            self.assoc.acse.send_request()
 
         self.assoc.acse._negotiate_as_requestor = patch_neg_rq
 
@@ -8606,9 +8646,9 @@ class TestState13(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def patch_neg_rq(assoc):
+        def patch_neg_rq():
             """Override ACSE._negotiate_as_requestor"""
-            assoc.acse.send_request(assoc)
+            self.assoc.acse.send_request()
 
         self.assoc.acse._negotiate_as_requestor = patch_neg_rq
 
@@ -8650,9 +8690,9 @@ class TestState13(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def patch_neg_rq(assoc):
+        def patch_neg_rq():
             """Override ACSE._negotiate_as_requestor"""
-            assoc.acse.send_request(assoc)
+            self.assoc.acse.send_request()
 
         self.assoc.acse._negotiate_as_requestor = patch_neg_rq
 
@@ -8690,18 +8730,17 @@ class TestState13(TestStateBase):
         # AA-6: Ignore PDU
         commands = [
             ('recv', None),
-            ('send', a_associate_rq),
+            ('send', a_associate_ac),
+            ('wait', 0.1),
+            ('send', a_associate_ac),
             ('send', p_data_tf),
             ('wait', 0.1),
         ]
         scp = self.start_server(commands)
 
-        def patch_neg_rq(assoc):
-            """Override ACSE._negotiate_as_requestor"""
-            assoc.acse.send_request(assoc)
-
-        self.assoc.acse._negotiate_as_requestor = patch_neg_rq
         self.assoc.start()
+        while not self.assoc.is_established:
+            time.sleep(0.05)
 
         time.sleep(0.2)
 
@@ -8709,14 +8748,19 @@ class TestState13(TestStateBase):
 
         scp.shutdown()
 
-        assert self.fsm._changes[:4] == [
+        assert self.fsm._changes[:5] == [
             ('Sta1', 'Evt1', 'AE-1'),
             ('Sta4', 'Evt2', 'AE-2'),
-            ('Sta5', 'Evt6', 'AA-8'),
+            ('Sta5', 'Evt3', 'AE-3'),
+            ('Sta6', 'Evt3', 'AA-8'),
             ('Sta13', 'Evt10', 'AA-6'),
         ]
-        assert self.fsm._transitions[:4] == ['Sta4', 'Sta5', 'Sta13', 'Sta13']
-        assert self.fsm._events[:4] == ['Evt1', 'Evt2', 'Evt6', 'Evt10']
+        assert self.fsm._transitions[:4] == [
+            'Sta4', 'Sta5', 'Sta6', 'Sta13'
+        ]
+        assert self.fsm._events[:5] == [
+            'Evt1', 'Evt2', 'Evt3', 'Evt3', 'Evt10'
+        ]
 
     def test_evt11(self):
         """Test Sta13 + Evt11."""
@@ -8729,9 +8773,9 @@ class TestState13(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def patch_neg_rq(assoc):
+        def patch_neg_rq():
             """Override ACSE._negotiate_as_requestor"""
-            assoc.acse.send_request(assoc)
+            self.assoc.acse.send_request()
 
         self.assoc.acse._negotiate_as_requestor = patch_neg_rq
 
@@ -8769,18 +8813,17 @@ class TestState13(TestStateBase):
         # AA-6: Ignore PDU
         commands = [
             ('recv', None),
-            ('send', a_associate_rq),
+            ('send', a_associate_ac),
+            ('wait', 0.1),
+            ('send', a_associate_ac),
             ('send', a_release_rq),
             ('wait', 0.1),
         ]
         scp = self.start_server(commands)
 
-        def patch_neg_rq(assoc):
-            """Override ACSE._negotiate_as_requestor"""
-            assoc.acse.send_request(assoc)
-
-        self.assoc.acse._negotiate_as_requestor = patch_neg_rq
         self.assoc.start()
+        while not self.assoc.is_established:
+            time.sleep(0.05)
 
         time.sleep(0.2)
 
@@ -8788,14 +8831,19 @@ class TestState13(TestStateBase):
 
         scp.shutdown()
 
-        assert self.fsm._changes[:4] == [
+        assert self.fsm._changes[:5] == [
             ('Sta1', 'Evt1', 'AE-1'),
             ('Sta4', 'Evt2', 'AE-2'),
-            ('Sta5', 'Evt6', 'AA-8'),
+            ('Sta5', 'Evt3', 'AE-3'),
+            ('Sta6', 'Evt3', 'AA-8'),
             ('Sta13', 'Evt12', 'AA-6'),
         ]
-        assert self.fsm._transitions[:4] == ['Sta4', 'Sta5', 'Sta13', 'Sta13']
-        assert self.fsm._events[:4] == ['Evt1', 'Evt2', 'Evt6', 'Evt12']
+        assert self.fsm._transitions[:4] == [
+            'Sta4', 'Sta5', 'Sta6', 'Sta13'
+        ]
+        assert self.fsm._events[:5] == [
+            'Evt1', 'Evt2', 'Evt3', 'Evt3', 'Evt12'
+        ]
 
     def test_evt13(self):
         """Test Sta13 + Evt13."""
@@ -8804,18 +8852,17 @@ class TestState13(TestStateBase):
         # AA-6: Ignore PDU
         commands = [
             ('recv', None),  # recv a-associate-rq
-            ('send', a_associate_rq),  # trigger evt6 -> AA-8 -> sta13
+            ('send', a_associate_ac),
+            ('wait', 0.1),
+            ('send', a_associate_ac),
             ('send', a_release_rp),
             ('wait', 0.1),
         ]
         scp = self.start_server(commands)
 
-        def patch_neg_rq(assoc):
-            """Override ACSE._negotiate_as_requestor"""
-            assoc.acse.send_request(assoc)
-
-        self.assoc.acse._negotiate_as_requestor = patch_neg_rq
         self.assoc.start()
+        while not self.assoc.is_established:
+            time.sleep(0.05)
 
         time.sleep(0.2)
 
@@ -8823,14 +8870,19 @@ class TestState13(TestStateBase):
 
         scp.shutdown()
 
-        assert self.fsm._changes[:4] == [
+        assert self.fsm._changes[:5] == [
             ('Sta1', 'Evt1', 'AE-1'),
             ('Sta4', 'Evt2', 'AE-2'),
-            ('Sta5', 'Evt6', 'AA-8'),
+            ('Sta5', 'Evt3', 'AE-3'),
+            ('Sta6', 'Evt3', 'AA-8'),
             ('Sta13', 'Evt13', 'AA-6'),
         ]
-        assert self.fsm._transitions[:4] == ['Sta4', 'Sta5', 'Sta13', 'Sta13']
-        assert self.fsm._events[:4] == ['Evt1', 'Evt2', 'Evt6', 'Evt13']
+        assert self.fsm._transitions[:4] == [
+            'Sta4', 'Sta5', 'Sta6', 'Sta13'
+        ]
+        assert self.fsm._events[:5] == [
+            'Evt1', 'Evt2', 'Evt3', 'Evt3', 'Evt13'
+        ]
 
     def test_evt14(self):
         """Test Sta13 + Evt14."""
@@ -8843,9 +8895,9 @@ class TestState13(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def patch_neg_rq(assoc):
+        def patch_neg_rq():
             """Override ACSE._negotiate_as_requestor"""
-            assoc.acse.send_request(assoc)
+            self.assoc.acse.send_request()
 
         self.assoc.acse._negotiate_as_requestor = patch_neg_rq
 
@@ -8887,9 +8939,9 @@ class TestState13(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def patch_neg_rq(assoc):
+        def patch_neg_rq():
             """Override ACSE._negotiate_as_requestor"""
-            assoc.acse.send_request(assoc)
+            self.assoc.acse.send_request()
 
         self.assoc.acse._negotiate_as_requestor = patch_neg_rq
 
@@ -8927,18 +8979,17 @@ class TestState13(TestStateBase):
         # AA-2: Stop ARTIM, close connection
         commands = [
             ('recv', None),
-            ('send', a_associate_rq),
+            ('send', a_associate_ac),
+            ('wait', 0.1),
+            ('send', a_associate_ac),
             ('send', a_abort),
             ('wait', 0.1),
         ]
         scp = self.start_server(commands)
 
-        def patch_neg_rq(assoc):
-            """Override ACSE._negotiate_as_requestor"""
-            assoc.acse.send_request(assoc)
-
-        self.assoc.acse._negotiate_as_requestor = patch_neg_rq
         self.assoc.start()
+        while not self.assoc.is_established:
+            time.sleep(0.05)
 
         time.sleep(0.2)
 
@@ -8946,14 +8997,19 @@ class TestState13(TestStateBase):
 
         scp.shutdown()
 
-        assert self.fsm._changes[:4] == [
+        assert self.fsm._changes[:5] == [
             ('Sta1', 'Evt1', 'AE-1'),
             ('Sta4', 'Evt2', 'AE-2'),
-            ('Sta5', 'Evt6', 'AA-8'),
+            ('Sta5', 'Evt3', 'AE-3'),
+            ('Sta6', 'Evt3', 'AA-8'),
             ('Sta13', 'Evt16', 'AA-2'),
         ]
-        assert self.fsm._transitions[:4] == ['Sta4', 'Sta5', 'Sta13', 'Sta1']
-        assert self.fsm._events[:4] == ['Evt1', 'Evt2', 'Evt6', 'Evt16']
+        assert self.fsm._transitions[:4] == [
+            'Sta4', 'Sta5', 'Sta6', 'Sta13'
+        ]
+        assert self.fsm._events[:5] == [
+            'Evt1', 'Evt2', 'Evt3', 'Evt3', 'Evt16'
+        ]
 
     def test_evt17(self):
         """Test Sta13 + Evt17."""
@@ -8962,16 +9018,15 @@ class TestState13(TestStateBase):
         # AR-5: Stop ARTIM
         commands = [
             ('recv', None),
-            ('send', a_associate_rq),
+            ('send', a_associate_ac),
+            ('wait', 0.1),
+            ('send', a_associate_ac),
         ]
         scp = self.start_server(commands)
 
-        def patch_neg_rq(assoc):
-            """Override ACSE._negotiate_as_requestor"""
-            assoc.acse.send_request(assoc)
-
-        self.assoc.acse._negotiate_as_requestor = patch_neg_rq
         self.assoc.start()
+        while not self.assoc.is_established:
+            time.sleep(0.05)
 
         time.sleep(0.2)
 
@@ -8979,14 +9034,19 @@ class TestState13(TestStateBase):
 
         scp.shutdown()
 
-        assert self.fsm._changes[:4] == [
+        assert self.fsm._changes[:5] == [
             ('Sta1', 'Evt1', 'AE-1'),
             ('Sta4', 'Evt2', 'AE-2'),
-            ('Sta5', 'Evt6', 'AA-8'),
+            ('Sta5', 'Evt3', 'AE-3'),
+            ('Sta6', 'Evt3', 'AA-8'),
             ('Sta13', 'Evt17', 'AR-5'),
         ]
-        assert self.fsm._transitions[:4] == ['Sta4', 'Sta5', 'Sta13', 'Sta1']
-        assert self.fsm._events[:4] == ['Evt1', 'Evt2', 'Evt6', 'Evt17']
+        assert self.fsm._transitions[:4] == [
+            'Sta4', 'Sta5', 'Sta6', 'Sta13'
+        ]
+        assert self.fsm._events[:5] == [
+            'Evt1', 'Evt2', 'Evt3', 'Evt3', 'Evt17'
+        ]
 
     def test_evt18(self):
         """Test Sta13 + Evt18."""
@@ -9000,9 +9060,9 @@ class TestState13(TestStateBase):
         ]
         scp = self.start_server(commands)
 
-        def patch_neg_rq(assoc):
+        def patch_neg_rq():
             """Override ACSE._negotiate_as_requestor"""
-            assoc.acse.send_request(assoc)
+            self.assoc.acse.send_request()
 
         self.assoc.acse._negotiate_as_requestor = patch_neg_rq
 
@@ -9046,18 +9106,17 @@ class TestState13(TestStateBase):
         # AA-7: Send A-ABORT PDU to <remote>
         commands = [
             ('recv', None),
-            ('send', a_associate_rq),
+            ('send', a_associate_ac),
+            ('wait', 0.1),
+            ('send', a_associate_ac),
             ('send', b'\x08\x00\x00\x00\x00\x00\x00\x00'),
             ('wait', 0.1),
         ]
         scp = self.start_server(commands)
 
-        def patch_neg_rq(assoc):
-            """Override ACSE._negotiate_as_requestor"""
-            assoc.acse.send_request(assoc)
-
-        self.assoc.acse._negotiate_as_requestor = patch_neg_rq
         self.assoc.start()
+        while not self.assoc.is_established:
+            time.sleep(0.05)
 
         time.sleep(0.2)
 
@@ -9065,14 +9124,19 @@ class TestState13(TestStateBase):
 
         scp.shutdown()
 
-        assert self.fsm._changes[:4] == [
+        assert self.fsm._changes[:5] == [
             ('Sta1', 'Evt1', 'AE-1'),
             ('Sta4', 'Evt2', 'AE-2'),
-            ('Sta5', 'Evt6', 'AA-8'),
+            ('Sta5', 'Evt3', 'AE-3'),
+            ('Sta6', 'Evt3', 'AA-8'),
             ('Sta13', 'Evt19', 'AA-7'),
         ]
-        assert self.fsm._transitions[:4] == ['Sta4', 'Sta5', 'Sta13', 'Sta13']
-        assert self.fsm._events[:4] == ['Evt1', 'Evt2', 'Evt6', 'Evt19']
+        assert self.fsm._transitions[:4] == [
+            'Sta4', 'Sta5', 'Sta6', 'Sta13'
+        ]
+        assert self.fsm._events[:5] == [
+            'Evt1', 'Evt2', 'Evt3', 'Evt3', 'Evt19'
+        ]
 
 
 class TestParrotAttack(TestStateBase):
@@ -9115,7 +9179,8 @@ class TestParrotAttack(TestStateBase):
             ('Sta6', 'Evt10', 'DT-2'),
             ('Sta6', 'Evt10', 'DT-2'),
             ('Sta6', 'Evt12', 'AR-2'),
-            ('Sta8', 'Evt17', 'AA-4'),
+            ('Sta8', 'Evt14', 'AR-4'),
+            ('Sta13', 'Evt17', 'AR-5'),
         ]
 
     def test_acceptor(self):
@@ -9231,8 +9296,8 @@ class TestStateMachineFunctionalRequestor(object):
         assoc.acceptor.port = 11112
 
         # Association Requestor object -> local AE
-        assoc.requestor.address = ae.address
-        assoc.requestor.port = ae.port
+        assoc.requestor.address = ''
+        assoc.requestor.port = 11113
         assoc.requestor.ae_title = ae.ae_title
         assoc.requestor.maximum_length = 16382
         assoc.requestor.implementation_class_uid = (
@@ -9366,41 +9431,6 @@ class TestStateMachineFunctionalRequestor(object):
             ('Sta1', 'Evt1', 'AE-1'),  # recv A-ASSOC rq primitive
             ('Sta4', 'Evt2', 'AE-2'),  # connection confirmed
             ('Sta5', 'Evt4', 'AE-4'),  # A-ASSOC-RJ PDU recv
-        ]
-
-        assert self.fsm.current_state == 'Sta1'
-
-        self.scp.stop()
-
-    def test_associate_peer_aborts(self):
-        """Test association negotiation aborted by peer."""
-        self.scp = DummyVerificationSCP()
-        self.scp.ae.port = 11112
-        self.scp.send_a_abort = True
-        self.scp.use_old_start = True
-        self.scp.select_timeout = 0.5
-        self.scp.ae._handle_connection = self.scp.dev_handle_connection
-        self.scp.start()
-
-        assert self.fsm.current_state == 'Sta1'
-
-        self.assoc.start()
-
-        while (not self.assoc.is_established and not self.assoc.is_rejected and
-               not self.assoc.is_aborted and not self.assoc.dul._kill_thread):
-            time.sleep(0.05)
-
-        assert self.assoc.is_aborted
-
-        assert self.fsm._transitions == [
-            'Sta4',  # Waiting for connection to complete
-            'Sta5',  # Waiting for A-ASSOC-AC or -RJ PDU
-            'Sta1'  # Idle
-        ]
-        assert self.fsm._changes == [
-            ('Sta1', 'Evt1', 'AE-1'),  # recv A-ASSOC rq primitive
-            ('Sta4', 'Evt2', 'AE-2'),  # connection confirmed
-            ('Sta5', 'Evt16', 'AA-3'),  # A-ABORT PDU recv
         ]
 
         assert self.fsm.current_state == 'Sta1'
@@ -9571,7 +9601,6 @@ class TestStateMachineFunctionalRequestor(object):
             dul.pdu = A_RELEASE_RP()
             dul.pdu.from_primitive(dul.primitive)
             # Callback
-            dul.assoc.acse.debug_send_release_rp(dul.pdu)
             dul.socket.send(dul.pdu.encode())
             dul.artim_timer.start()
             return 'Sta13'
@@ -9694,8 +9723,8 @@ class TestStateMachineFunctionalAcceptor(object):
         assoc.acceptor.port = 11112
 
         # Association Requestor object -> local AE
-        assoc.requestor.address = ae.address
-        assoc.requestor.port = ae.port
+        assoc.requestor.address = ''
+        assoc.requestor.port = 11113
         assoc.requestor.ae_title = ae.ae_title
         assoc.requestor.maximum_length = 16382
         assoc.requestor.implementation_class_uid = (
@@ -9765,8 +9794,6 @@ class TestStateMachineFunctionalAcceptor(object):
             dul.pdu = A_ASSOCIATE_RQ()
             dul.pdu.from_primitive(dul.primitive)
             dul.pdu.protocol_version = 0x0002
-            # Callback
-            dul.assoc.acse.debug_send_associate_rq(dul.pdu)
             bytestream = dul.pdu.encode()
             dul.socket.send(bytestream)
             return 'Sta5'
@@ -9788,3 +9815,291 @@ class TestStateMachineFunctionalAcceptor(object):
 
         self.scp.stop()
         FINITE_STATE.ACTIONS['AE-2']= orig_entry
+
+
+class TestEventHandling(object):
+    """Test the FSM event handlers."""
+    def setup(self):
+        self.ae = None
+
+    def teardown(self):
+        if self.ae:
+            self.ae.shutdown()
+
+    def test_no_handlers(self):
+        """Test with no handlers bound."""
+        self.ae = ae = AE()
+        ae.add_supported_context('1.2.840.10008.1.1')
+        ae.add_requested_context('1.2.840.10008.1.1')
+        scp = ae.start_server(('', 11112), block=False)
+        assert scp.get_handlers(evt.EVT_FSM_TRANSITION) == []
+
+        assoc = ae.associate('localhost', 11112)
+        assert assoc.is_established
+        assert assoc.get_handlers(evt.EVT_FSM_TRANSITION) == []
+
+        child = scp.active_associations[0]
+        assert child.get_handlers(evt.EVT_FSM_TRANSITION) == []
+
+        assoc.release()
+
+        scp.shutdown()
+
+    def test_transition_acceptor(self):
+        """Test EVT_FSM_TRANSITION as acceptor."""
+        triggered = []
+        def handle(event):
+            triggered.append(event)
+
+        self.ae = ae = AE()
+        ae.add_supported_context('1.2.840.10008.1.1')
+        ae.add_requested_context('1.2.840.10008.1.1')
+        handlers = [(evt.EVT_FSM_TRANSITION, handle)]
+        scp = ae.start_server(('', 11112), block=False, evt_handlers=handlers)
+        assert scp.get_handlers(evt.EVT_FSM_TRANSITION) == [handle]
+
+        assoc = ae.associate('localhost', 11112)
+        assert assoc.is_established
+        assert assoc.get_handlers(evt.EVT_FSM_TRANSITION) == []
+
+        child = scp.active_associations[0]
+        assert child.get_handlers(evt.EVT_FSM_TRANSITION) == [handle]
+
+        assoc.release()
+        while scp.active_associations:
+            time.sleep(0.05)
+
+        for event in triggered:
+            assert hasattr(event, 'current_state')
+            assert hasattr(event, 'fsm_event')
+            assert hasattr(event, 'action')
+            assert hasattr(event, 'next_state')
+            assert isinstance(event.assoc, Association)
+            assert isinstance(event.timestamp, datetime.datetime)
+            assert event.event.name == 'EVT_FSM_TRANSITION'
+            assert event.event.description == "State machine about to transition"
+
+        states = [ee.current_state for ee in triggered]
+        assert states[:6] == ['Sta1', 'Sta2', 'Sta3', 'Sta6', 'Sta8', 'Sta13']
+
+        scp.shutdown()
+
+    def test_transition_acceptor_bind(self):
+        """Test EVT_FSM_TRANSITION as acceptor."""
+        triggered = []
+        def handle(event):
+            triggered.append(event)
+
+        self.ae = ae = AE()
+        ae.add_supported_context('1.2.840.10008.1.1')
+        ae.add_requested_context('1.2.840.10008.1.1')
+        scp = ae.start_server(('', 11112), block=False)
+        assert scp.get_handlers(evt.EVT_FSM_TRANSITION) == []
+
+        assoc = ae.associate('localhost', 11112)
+        assert assoc.is_established
+        assert assoc.get_handlers(evt.EVT_FSM_TRANSITION) == []
+        child = scp.active_associations[0]
+        assert child.get_handlers(evt.EVT_FSM_TRANSITION) == []
+
+        scp.bind(evt.EVT_FSM_TRANSITION, handle)
+        assert scp.get_handlers(evt.EVT_FSM_TRANSITION) == [handle]
+        child = scp.active_associations[0]
+        assert child.get_handlers(evt.EVT_FSM_TRANSITION) == [handle]
+
+        assoc.release()
+        while scp.active_associations:
+            time.sleep(0.05)
+
+        for event in triggered:
+            assert hasattr(event, 'current_state')
+            assert hasattr(event, 'fsm_event')
+            assert hasattr(event, 'action')
+            assert hasattr(event, 'next_state')
+            assert isinstance(event.assoc, Association)
+            assert isinstance(event.timestamp, datetime.datetime)
+
+        states = [ee.current_state for ee in triggered]
+        assert states[:3] == ['Sta6', 'Sta8', 'Sta13']
+
+    def test_transition_acceptor_unbind(self):
+        """Test EVT_FSM_TRANSITION as acceptor."""
+        triggered = []
+        def handle(event):
+            triggered.append(event)
+
+        self.ae = ae = AE()
+        ae.add_supported_context('1.2.840.10008.1.1')
+        ae.add_requested_context('1.2.840.10008.1.1')
+        handlers = [(evt.EVT_FSM_TRANSITION, handle)]
+        scp = ae.start_server(('', 11112), block=False, evt_handlers=handlers)
+        assert scp.get_handlers(evt.EVT_FSM_TRANSITION) == [handle]
+
+        assoc = ae.associate('localhost', 11112)
+        assert assoc.is_established
+        child = scp.active_associations[0]
+        assert child.get_handlers(evt.EVT_FSM_TRANSITION) == [handle]
+
+        scp.unbind(evt.EVT_FSM_TRANSITION, handle)
+        assert scp.get_handlers(evt.EVT_FSM_TRANSITION) == []
+        child = scp.active_associations[0]
+        assert child.get_handlers(evt.EVT_FSM_TRANSITION) == []
+
+        assoc.release()
+        while scp.active_associations:
+            time.sleep(0.05)
+
+        for event in triggered:
+            assert hasattr(event, 'current_state')
+            assert hasattr(event, 'fsm_event')
+            assert hasattr(event, 'action')
+            assert hasattr(event, 'next_state')
+            assert isinstance(event.assoc, Association)
+            assert isinstance(event.timestamp, datetime.datetime)
+
+        states = [ee.current_state for ee in triggered]
+        assert states[:3] == ['Sta1', 'Sta2', 'Sta3']
+
+        scp.shutdown()
+
+    def test_transition_requestor(self):
+        """Test EVT_FSM_TRANSITION as requestor."""
+        triggered = []
+        def handle(event):
+            triggered.append(event)
+
+        self.ae = ae = AE()
+        ae.add_supported_context('1.2.840.10008.1.1')
+        ae.add_requested_context('1.2.840.10008.1.1')
+        handlers = [(evt.EVT_FSM_TRANSITION, handle)]
+        scp = ae.start_server(('', 11112), block=False)
+
+        assoc = ae.associate('localhost', 11112, evt_handlers=handlers)
+        assert assoc.get_handlers(evt.EVT_FSM_TRANSITION) == [handle]
+        assert assoc.is_established
+        assert scp.get_handlers(evt.EVT_FSM_TRANSITION) == []
+        child = scp.active_associations[0]
+        assert child.get_handlers(evt.EVT_FSM_TRANSITION) == []
+        assoc.release()
+        while not assoc.is_released:
+            time.sleep(0.05)
+
+        for event in triggered:
+            assert hasattr(event, 'current_state')
+            assert hasattr(event, 'fsm_event')
+            assert hasattr(event, 'action')
+            assert hasattr(event, 'next_state')
+            assert isinstance(event.assoc, Association)
+            assert isinstance(event.timestamp, datetime.datetime)
+
+        states = [ee.current_state for ee in triggered]
+        assert states[:5] == ['Sta1', 'Sta4', 'Sta5', 'Sta6', 'Sta7']
+
+        scp.shutdown()
+
+    def test_transition_requestor_bind(self):
+        """Test EVT_FSM_TRANSITION as requestor."""
+        triggered = []
+        def handle(event):
+            triggered.append(event)
+
+        self.ae = ae = AE()
+        ae.add_supported_context('1.2.840.10008.1.1')
+        ae.add_requested_context('1.2.840.10008.1.1')
+        scp = ae.start_server(('', 11112), block=False)
+
+        assoc = ae.associate('localhost', 11112)
+        assert assoc.is_established
+        assert assoc.get_handlers(evt.EVT_FSM_TRANSITION) == []
+
+        assoc.bind(evt.EVT_FSM_TRANSITION, handle)
+        assert assoc.get_handlers(evt.EVT_FSM_TRANSITION) == [handle]
+
+        assert scp.get_handlers(evt.EVT_FSM_TRANSITION) == []
+        child = scp.active_associations[0]
+        assert child.get_handlers(evt.EVT_FSM_TRANSITION) == []
+
+        assoc.release()
+        while not assoc.is_released:
+            time.sleep(0.05)
+
+        for event in triggered:
+            assert hasattr(event, 'current_state')
+            assert hasattr(event, 'fsm_event')
+            assert hasattr(event, 'action')
+            assert hasattr(event, 'next_state')
+            assert isinstance(event.assoc, Association)
+            assert isinstance(event.timestamp, datetime.datetime)
+
+        states = [ee.current_state for ee in triggered]
+        assert states[:2] == ['Sta6', 'Sta7']
+
+        scp.shutdown()
+
+    def test_transition_requestor_unbind(self):
+        """Test EVT_FSM_TRANSITION as requestor."""
+        triggered = []
+        def handle(event):
+            triggered.append(event)
+
+        self.ae = ae = AE()
+        ae.add_supported_context('1.2.840.10008.1.1')
+        ae.add_requested_context('1.2.840.10008.1.1')
+        handlers = [(evt.EVT_FSM_TRANSITION, handle)]
+        scp = ae.start_server(('', 11112), block=False)
+
+        assoc = ae.associate('localhost', 11112, evt_handlers=handlers)
+        assert assoc.is_established
+        assert assoc.get_handlers(evt.EVT_FSM_TRANSITION) == [handle]
+
+        assoc.unbind(evt.EVT_FSM_TRANSITION, handle)
+        assert assoc.get_handlers(evt.EVT_FSM_TRANSITION) == []
+
+        assert scp.get_handlers(evt.EVT_FSM_TRANSITION) == []
+        child = scp.active_associations[0]
+        assert child.get_handlers(evt.EVT_FSM_TRANSITION) == []
+
+        assoc.release()
+        while not assoc.is_released:
+            time.sleep(0.05)
+
+        for event in triggered:
+            assert hasattr(event, 'current_state')
+            assert hasattr(event, 'fsm_event')
+            assert hasattr(event, 'action')
+            assert hasattr(event, 'next_state')
+            assert isinstance(event.assoc, Association)
+            assert isinstance(event.timestamp, datetime.datetime)
+
+        states = [ee.current_state for ee in triggered]
+        assert states[:3] == ['Sta1', 'Sta4', 'Sta5']
+
+        scp.shutdown()
+
+    def test_transition_raises(self, caplog):
+        """Test the handler for EVT_FSM_TRANSITION raising exception."""
+        def handle(event):
+            raise NotImplementedError("Exception description")
+
+        self.ae = ae = AE()
+        ae.add_supported_context(VerificationSOPClass)
+        ae.add_requested_context(VerificationSOPClass)
+        handlers = [(evt.EVT_FSM_TRANSITION, handle)]
+        scp = ae.start_server(('', 11112), block=False, evt_handlers=handlers)
+
+        with caplog.at_level(logging.ERROR, logger='pynetdicom'):
+            assoc = ae.associate('localhost', 11112)
+            assert assoc.is_established
+            assoc.release()
+
+            while scp.active_associations:
+                time.sleep(0.05)
+
+            scp.shutdown()
+
+            msg = (
+                "Exception raised in user's 'evt.EVT_FSM_TRANSITION' event "
+                "handler 'handle'"
+            )
+            assert msg in caplog.text
+            assert "Exception description" in caplog.text
